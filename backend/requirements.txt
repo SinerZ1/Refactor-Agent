@@ -1,0 +1,25 @@
+# ============================================================
+# Refactor-Agent Backend Dependencies (Python 3.12)
+# ------------------------------------------------------------
+# 教学说明: 依赖分三层 —— Web 层 / Agent 编排层 / 数据层
+# ============================================================
+
+# --- Web 层: FastAPI + ASGI 服务器 ---
+fastapi>=0.115.0          # 提供REST/SSE/WS路由; SSE用StreamingResponse, WS用WebSocket
+uvicorn[standard]>=0.32.0 # ASGI服务器, [standard]含websockets/httptools加速
+
+# --- Agent 编排层: LangGraph + LangChain (多模型兼容) ---
+langgraph>=0.2.60         # 核心图引擎: StateGraph/conditional_edge/interrupt/Checkpointer
+langchain-core>=0.3.28    # BaseChatModel/@tool/消息类型等抽象基类
+langchain-openai>=0.2.10  # OpenAI兼容客户端 —— GLM/智谱通过base_url复用此包
+langchain-google-genai>=2.0.5  # Gemini 原生客户端(工具调用格式与OpenAI不同, 需单独适配)
+langgraph-checkpoint-redis>=0.4.0  # Redis Checkpointer —— 状态持久化(对应Hello-Agents上下文持久化)
+
+# --- 数据层: Redis(pub/sub) + Neo4j(图谱) ---
+redis>=5.2.0              # A2A聊天室的pub/sub消息总线; 也被Checkpointer复用
+neo4j>=5.26.0             # 官方驱动, 存储AST抽取的代码依赖图
+
+# --- 配置与工具 ---
+pydantic>=2.9.0           # 数据校验/序列化
+pydantic-settings>=2.6.0  # 从.env读取配置(Neo4j/Redis凭据)
+python-dotenv>=1.0.1      # .env文件加载
