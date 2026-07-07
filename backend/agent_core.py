@@ -94,7 +94,15 @@ def run_unit_tests(test_command: str = "pytest") -> str:
     except Exception as e:
         return f"运行测试失败: {str(e)}"
 
-tools = [read_code_file, write_code_file, run_unit_tests]
+@tool
+def search_symbol_definition(symbol_name: str) -> str:
+    """
+    当你分析或重构当前文件，遇到外部导入的类名、函数名，或者你不懂的自定义符号时，你可以使用此工具查询它在本项目其他文件中的原始定义和源代码，支持精准跨文件上下文召回（RAG）。
+    """
+    from code_indexer import get_symbol_definition_content
+    return get_symbol_definition_content(symbol_name)
+
+tools = [read_code_file, write_code_file, run_unit_tests, search_symbol_definition]
 llm_with_tools = llm.bind_tools(tools)
 
 # ============================================================
@@ -104,6 +112,8 @@ llm_with_tools = llm.bind_tools(tools)
 # 系统级指令
 SYSTEM_PROMPT = """你是一个能够使用本地工具并拥有对话记忆的资深 Python 架构师。
 你可以读取文件、修改文件、运行测试。如果你要分析或重构某个路径下的代码，请先用 `read_code_file` 读取它。
+在分析文件代码时，如果你发现该文件导入了其他本地模块的类或函数（例如 `from models import DB, UserRecord`），你应当使用 `search_symbol_definition` 依次检索这些外部类或函数（如检索 `DB` 和 `UserRecord`）的原始实现，以此作为跨文件重构的高精确度上下文。
+对代码进行深度分析后，编写优雅、解耦（如采用依赖注入等面向对象重构模式）的重构版本。
 在对代码进行优化、修改、或者根据用户的后续意见进行局部的微调后，你要写回文件并运行 `run_unit_tests` 进行测试。
 
 【注意】：

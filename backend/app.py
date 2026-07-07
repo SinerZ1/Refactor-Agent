@@ -5,8 +5,14 @@ from pydantic import BaseModel
 import uvicorn
 import json
 from agent_core import simple_refactor, stream_refactor
+from code_indexer import index_directory
 
 app = FastAPI(title="Refactor-Agent Backend")
+
+@app.on_event("startup")
+def startup_event():
+    # 启动时自动静态扫描 CodeSmells 目录，构建 AST 符号索引
+    index_directory()
 
 # 配置 CORS，允许前端应用（如 Vite 默认端口 5173）访问
 app.add_middleware(
