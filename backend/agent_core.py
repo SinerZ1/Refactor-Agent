@@ -1,13 +1,20 @@
 from langchain_openai import ChatOpenAI
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.prompts import ChatPromptTemplate
 from pydantic_settings import BaseSettings
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.tools import tool
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from typing import Annotated, TypedDict, Literal
 import os
 import subprocess
 import json
 from dotenv import load_dotenv
+
+# 引入 LangGraph 核心组件
+from langgraph.graph import StateGraph, START, END
+from langgraph.graph.message import add_messages
+from langgraph.prebuilt import ToolNode
+from langgraph.checkpoint.memory import MemorySaver
 
 # 加载 .env 环境变量
 load_dotenv()
@@ -23,11 +30,11 @@ class Settings(BaseSettings):
 
 settings = Settings()
 
-# 初始化 LLM 客户端，根据环境变量切换 Vertex AI 或 OpenAI
+# 初始化 LLM 客户端
 if settings.use_vertex:
     llm = ChatGoogleGenerativeAI(
         model=settings.vertex_model_name,
-        project=settings.vertex_project, # 恢复 project 属性，用于 Google Vertex AI ADC 校验
+        project=settings.vertex_project,
         temperature=0.2,
     )
 else:
@@ -39,7 +46,7 @@ else:
     )
 
 # ============================================================
-# 阶段 3: 定义 Tool (工具)
+# 工具定义 (Tools)
 # ============================================================
 
 @tool
@@ -48,7 +55,6 @@ def read_code_file(file_path: str) -> str:
     读取指定路径下的本地代码文件内容。当用户指定文件路径，或者你想查看某个具体文件的代码时使用。
     """
     try:
-        # 支持相对路径和绝对路径
         with open(file_path, "r", encoding="utf-8") as f:
             return f.read()
     except Exception as e:
@@ -60,7 +66,6 @@ def write_code_file(file_path: str, content: str) -> str:
     将重构后的完整代码写入到指定的本地文件路径中。当重构完成并且你需要保存修改时使用。
     """
     try:
-        # 自动创建父级目录
         dir_name = os.path.dirname(os.path.abspath(file_path))
         if dir_name:
             os.makedirs(dir_name, exist_ok=True)
@@ -76,7 +81,6 @@ def run_unit_tests(test_command: str = "pytest") -> str:
     执行本项目的测试命令（例如 pytest）来运行单元测试，验证重构后的代码是否符合质量标准。
     """
     try:
-        # 执行测试命令并获取输出
         result = subprocess.run(
             test_command,
             shell=True,
@@ -90,138 +94,121 @@ def run_unit_tests(test_command: str = "pytest") -> str:
     except Exception as e:
         return f"运行测试失败: {str(e)}"
 
-# 整理工具列表
 tools = [read_code_file, write_code_file, run_unit_tests]
-tools_map = {tool.name: tool for tool in tools}
-
-# 将工具绑定到 LLM 实例上，使模型具备进行 Tool Calling 的能力
 llm_with_tools = llm.bind_tools(tools)
 
 # ============================================================
-# 核心重构与流式 Agent 逻辑
+# 阶段 4: LangGraph 状态图与持久化 (Memory/Redis)
 # ============================================================
 
-# 系统指令：引导智能体如何结合工具进行重构
-SYSTEM_PROMPT = """你是一个能够使用本地工具的资深 Python 架构师和代码重构专家。
-你拥有以下工具：
-1. `read_code_file`：读取本地代码文件。
-2. `write_code_file`：将重构后的最新代码写回文件。
-3. `run_unit_tests`：运行测试用例以验证代码。
+# 系统级指令
+SYSTEM_PROMPT = """你是一个能够使用本地工具并拥有对话记忆的资深 Python 架构师。
+你可以读取文件、修改文件、运行测试。如果你要分析或重构某个路径下的代码，请先用 `read_code_file` 读取它。
+在对代码进行优化、修改、或者根据用户的后续意见进行局部的微调后，你要写回文件并运行 `run_unit_tests` 进行测试。
 
-【重构工作流指南】：
-- 如果用户给出的代码是一个本地文件路径（如 backend/CodeSmells/Calculator.py），你应当**先使用** `read_code_file` 读取文件内容。
-- 对代码进行深度分析后，编写优雅的重构版本。
-- 重构完成后，你应当使用 `write_code_file` 将新代码写回原文件。
-- 写回后，你应当使用 `run_unit_tests` 工具运行测试（例如运行 `pytest` 或是指定测试命令），验证修改是否破坏了原有功能。
-- 在最后，向用户清晰地报告你的重构改动，并直接展示重构后的最终代码。使用 Markdown 代码块。
-
-如果你只是接收到了一段纯代码（而不是文件路径），你无需写入文件或测试，直接在回复中输出重构后的代码即可。
+【注意】：
+- 你们正在进行一个多轮对话。如果用户说“再把 add 方法重命名为 sum”，说明是在针对刚才的代码进行后续修改。
+- 请直接完成修改，写回原文件，并通过测试后告诉用户。
+- 最终回复时，请直接给出最新的完整代码。
 """
+
+# 定义状态 (State) 字典，messages 字段会自动追加新消息
+class State(TypedDict):
+    messages: Annotated[list, add_messages]
+
+# 1. 定义 Agent 节点逻辑
+def call_agent(state: State):
+    messages = state["messages"]
+    # 确保首条消息前有 System 指令
+    if not any(isinstance(m, SystemMessage) for m in messages):
+        messages = [SystemMessage(content=SYSTEM_PROMPT)] + messages
+    
+    response = llm_with_tools.invoke(messages)
+    return {"messages": [response]}
+
+# 2. 定义条件路由判断函数
+def should_continue(state: State) -> Literal["tools", "__end__"]:
+    last_message = state["messages"][-1]
+    if last_message.tool_calls:
+        return "tools"
+    return "__end__"
+
+# 3. 构建 LangGraph 状态图
+workflow = StateGraph(State)
+
+# 添加节点
+workflow.add_node("agent", call_agent)
+workflow.add_node("tools", ToolNode(tools))
+
+# 设置连线
+workflow.add_edge(START, "agent")
+workflow.add_conditional_edges("agent", should_continue)
+workflow.add_edge("tools", "agent")
+
+# 4. 初始化持久化 Checkpointer (双保险支持)
+def get_checkpointer():
+    redis_url = os.getenv("REDIS_URL")
+    if redis_url:
+        try:
+            from langgraph.checkpoint.redis import RedisSaver
+            saver = RedisSaver.from_conn_string(redis_url)
+            print("[Checkpointer] 成功加载 RedisSaver 持久化记忆。")
+            return saver
+        except Exception as e:
+            print(f"[Checkpointer] 初始化 RedisSaver 失败: {e}。将降级使用 MemorySaver。")
+    return MemorySaver()
+
+# 编译 Graph 状态机
+app_graph = workflow.compile(checkpointer=get_checkpointer())
+
+# ============================================================
+# 外层调用适配方法
+# ============================================================
 
 def simple_refactor(code: str) -> str:
     """
-    接收原始代码/路径，进行一次完整的重构（同步阻塞版）
+    同步阻塞重构 (阶段 1-3 遗留兼容)
     """
-    if not settings.use_vertex and (not settings.openai_api_key or settings.openai_api_key == "your_api_key_here"):
-        return "# [错误] 请在 backend/.env 文件中配置你的 API 密钥。"
-
-    messages = [
-        SystemMessage(content=SYSTEM_PROMPT),
-        HumanMessage(content=f"请帮我处理以下代码或路径：\n\n{code}")
-    ]
-
+    config = {"configurable": {"thread_id": "default_sync_session"}}
+    input_msg = HumanMessage(content=f"请帮我处理以下代码或路径：\n\n{code}")
     try:
-        # 最大工具调用循环次数，防止无限循环
-        for _ in range(5):
-            response = llm_with_tools.invoke(messages)
-            messages.append(response)
-
-            # 如果没有工具调用请求，说明已经得到最终回复
-            if not response.tool_calls:
-                return response.content if isinstance(response.content, str) else str(response.content)
-
-            # 处理工具调用
-            for tool_call in response.tool_calls:
-                tool_name = tool_call["name"]
-                tool_args = tool_call["args"]
-                tool_id = tool_call["id"]
-
-                if tool_name in tools_map:
-                    # 执行具体工具
-                    tool_result = tools_map[tool_name].invoke(tool_args)
-                    # 将工具返回结果作为 ToolMessage 存入历史，反馈给 LLM
-                    messages.append(ToolMessage(content=str(tool_result), tool_call_id=tool_id))
-                else:
-                    messages.append(ToolMessage(content=f"错误：找不到工具 {tool_name}", tool_call_id=tool_id))
-        
-        return "Agent 超过了最大工具调用次数限制。"
+        final_state = app_graph.invoke({"messages": [input_msg]}, config)
+        return final_state["messages"][-1].content
     except Exception as e:
-        return f"# [重构失败]\n# 错误信息: {str(e)}"
+        return f"# [运行失败]\n# 错误信息: {str(e)}"
 
-def stream_refactor(code: str):
+def stream_refactor(code: str, thread_id: str = "default_session"):
     """
-    流式重构代码并实时反馈工具调用日志 (SSE 友好生成器)
+    使用 LangGraph 状态图执行多轮对话流式生成器
     """
-    if not settings.use_vertex and (not settings.openai_api_key or settings.openai_api_key == "your_api_key_here"):
-        yield "# [错误] 请在 backend/.env 文件中配置你的 API 密钥。"
-        return
-
-    messages = [
-        SystemMessage(content=SYSTEM_PROMPT),
-        HumanMessage(content=f"请帮我处理以下代码或路径：\n\n{code}")
-    ]
+    config = {"configurable": {"thread_id": thread_id}}
+    
+    # 检查当前会话是否存在历史。如果没有，则是首轮代码重构；如果有，则是后续对话指令。
+    current_state = app_graph.get_state(config)
+    if not current_state.values or not current_state.values.get("messages"):
+        input_msg = HumanMessage(content=f"请帮我处理以下代码或路径：\n\n{code}")
+    else:
+        input_msg = HumanMessage(content=code)
 
     try:
-        for _ in range(5):
-            response = llm_with_tools.invoke(messages)
-            messages.append(response)
-
-            # 1. 检查 LLM 是否需要进行 Tool Calling
-            if response.tool_calls:
-                for tool_call in response.tool_calls:
-                    tool_name = tool_call["name"]
-                    tool_args = tool_call["args"]
-                    tool_id = tool_call["id"]
-
-                    # 将正在调用工具的“日志”推送给前端
-                    yield f"[INFO] Agent 决定调用工具 `{tool_name}`，参数为: {json.dumps(tool_args, ensure_ascii=False)}\n"
-
-                    if tool_name in tools_map:
-                        tool_result = tools_map[tool_name].invoke(tool_args)
-                        yield f"[SUCCESS] 工具 `{tool_name}` 运行结果:\n{tool_result}\n"
-                        messages.append(ToolMessage(content=str(tool_result), tool_call_id=tool_id))
-                    else:
-                        err_msg = f"找不到工具 {tool_name}"
-                        yield f"[ERROR] {err_msg}\n"
-                        messages.append(ToolMessage(content=err_msg, tool_call_id=tool_id))
-                
-                # 继续下一次循环，让 LLM 根据工具结果做出下一步决定
-                continue
-
-            # 2. 如果没有 Tool Calling，说明进入了最终回答阶段，流式输出内容
-            # 注意：因为之前的 invoke 是同步拿到的最终 AIMessage。如果它没有 tool_calls，
-            # 我们可以通过 `stream` 接口对这轮对话启动流式，以获取打字机效果。
-            try:
-                for chunk in llm_with_tools.stream(messages[:-1]): # 传入不包含刚才 response 的 messages
-                    if hasattr(chunk, 'content'):
-                        content = chunk.content
-                        if isinstance(content, str):
-                            yield content
-                        elif isinstance(content, list):
-                            chunk_text = "".join(
-                                block.get("text", "") 
-                                for block in content 
-                                if isinstance(block, dict) and block.get("type") == "text"
-                            )
-                            yield chunk_text
-                    else:
-                        yield str(chunk)
-            except Exception as e:
-                # 降级：如果流式 stream 异常，则直接返回 content
-                yield response.content if isinstance(response.content, str) else str(response.content)
-            
-            # 完成最终回复，退出循环
-            break
-            
+        # 使用 astream 或 stream 迭代状态变更
+        for chunk in app_graph.stream({"messages": [input_msg]}, config, stream_mode="updates"):
+            for node_name, node_output in chunk.items():
+                if node_name == "tools":
+                    # 工具执行节点完毕，向前端推送运行日志
+                    for msg in node_output.get("messages", []):
+                        yield f"[SUCCESS] 工具 `{msg.name}` 运行结果:\n{msg.content}\n"
+                elif node_name == "agent":
+                    # Agent 运行，检测是否触发工具调用
+                    for msg in node_output.get("messages", []):
+                        if msg.tool_calls:
+                            for tc in msg.tool_calls:
+                                yield f"[INFO] Agent 决定调用工具 `{tc['name']}`，参数为: {json.dumps(tc['args'], ensure_ascii=False)}\n"
+                        else:
+                            # 最终回答，使用打字机流式效果输出
+                            text_content = msg.content
+                            chunk_size = 8
+                            for i in range(0, len(text_content), chunk_size):
+                                yield text_content[i:i+chunk_size]
     except Exception as e:
         yield f"\n# [运行失败]\n# 错误信息: {str(e)}\n"

@@ -20,6 +20,7 @@ app.add_middleware(
 # 定义前端请求的数据模型
 class RefactorRequest(BaseModel):
     code: str
+    thread_id: str = "default_session"
 
 # 定义返回的数据模型
 class RefactorResponse(BaseModel):
@@ -48,7 +49,7 @@ def refactor_code_stream(request: RefactorRequest):
     流式接收重构代码，返回 SSE (Server-Sent Events) 流
     """
     def event_generator():
-        for token in stream_refactor(request.code):
+        for token in stream_refactor(request.code, request.thread_id):
             # 将每个 token 序列化为 JSON 以便前端解析
             yield f"data: {json.dumps({'token': token})}\n\n"
     

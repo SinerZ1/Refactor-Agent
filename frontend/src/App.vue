@@ -3,15 +3,21 @@ import { ref, computed, nextTick, watch } from 'vue'
 import hljs from 'highlight.js'
 import 'highlight.js/styles/vs2015.css' // 使用 VS2015 深色代码高亮主题
 
-const sourceCode = ref('backend/CodeSmells/Calculator.py') // 默认填入要重构的测试文件路径
+// 基础状态
+const sourceCode = ref('backend/CodeSmells/Calculator.py') // 默认要重构的测试文件路径
 const refactoredCode = ref('')
 const isRefactoring = ref(false)
 const agentLogs = ref<{ type: 'info' | 'success' | 'error'; message: string }[]>([])
 
+// 阶段 4：会话与多轮对话记忆状态
+const threadId = ref('session_' + Math.random().toString(36).substring(2, 9))
+const userChatInput = ref('')
+const chatMessages = ref<{ role: 'user' | 'agent'; text: string }[]>([])
+
 // 计算属性：利用 highlight.js 对生成的代码进行实时语法高亮
 const highlightedCode = computed(() => {
   if (!refactoredCode.value) {
-    return '<span style="color: #6a9955;"># 重构后的代码将在此显示...</span>'
+    return '<span style="color: #6a9955;"># 重构后的最新代码将在此显示...</span>'
   }
   try {
     return hljs.highlight(refactoredCode.value, { language: 'python' }).value
@@ -21,8 +27,10 @@ const highlightedCode = computed(() => {
   }
 })
 
-// 监听日志变化，自动滚动到日志区域底部
+// 自动滚动控制
 const logContainerRef = ref<HTMLDivElement | null>(null)
+const chatContainerRef = ref<HTMLDivElement | null>(null)
+
 watch(agentLogs, () => {
   nextTick(() => {
     if (logContainerRef.value) {
@@ -31,15 +39,40 @@ watch(agentLogs, () => {
   })
 }, { deep: true })
 
-const handleRefactorStream = async () => {
-  if (!sourceCode.value.trim()) {
-    alert('请输入需要重构的代码内容或本地文件路径！')
-    return
+watch(chatMessages, () => {
+  nextTick(() => {
+    if (chatContainerRef.value) {
+      chatContainerRef.value.scrollTop = chatContainerRef.value.scrollHeight
+    }
+  })
+}, { deep: true })
+
+// 重置会话 (New Session)
+const handleNewSession = () => {
+  threadId.value = 'session_' + Math.random().toString(36).substring(2, 9)
+  refactoredCode.value = ''
+  userChatInput.value = ''
+  chatMessages.value = []
+  agentLogs.value = []
+}
+
+// 核心流式请求方法
+const sendStreamRequest = async (payloadText: string, isInitialTurn: boolean) => {
+  isRefactoring.value = true
+  if (isInitialTurn) {
+    refactoredCode.value = ''
+    chatMessages.value = []
   }
 
-  isRefactoring.value = true
-  refactoredCode.value = '' 
-  agentLogs.value = [] // 清空之前的日志
+  // 为本次对话在 Chat 中占个位
+  const agentMessageIndex = chatMessages.value.length
+  if (!isInitialTurn) {
+    chatMessages.value.push({ role: 'agent', text: '正在思考...' })
+  } else {
+    chatMessages.value.push({ role: 'agent', text: '正在进行首次代码分析与重构...' })
+  }
+
+  let accumulatedResponse = ''
 
   try {
     const response = await fetch('http://127.0.0.1:8000/api/refactor/stream', {
@@ -47,7 +80,10 @@ const handleRefactorStream = async () => {
       headers: {
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({ code: sourceCode.value })
+      body: JSON.stringify({ 
+        code: payloadText,
+        thread_id: threadId.value
+      })
     })
 
     if (!response.ok) {
@@ -79,7 +115,6 @@ const handleRefactorStream = async () => {
             if (parsed.token) {
               const token = parsed.token
               
-              // 匹配阶段 3 的日志前缀，拦截并呈现在日志面板中
               if (token.startsWith('[INFO]')) {
                 agentLogs.value.push({ type: 'info', message: token.replace('[INFO]', '').trim() })
               } else if (token.startsWith('[SUCCESS]')) {
@@ -87,67 +122,155 @@ const handleRefactorStream = async () => {
               } else if (token.startsWith('[ERROR]')) {
                 agentLogs.value.push({ type: 'error', message: token.replace('[ERROR]', '').trim() })
               } else {
-                // 如果不是日志，则是最终代码 Token，流入代码显示区域
-                refactoredCode.value += token
+                // 累积代码文本并更新视图
+                accumulatedResponse += token
+                refactoredCode.value = accumulatedResponse
+                if (chatMessages.value[agentMessageIndex]) {
+                  chatMessages.value[agentMessageIndex].text = accumulatedResponse
+                }
               }
             }
           } catch (e) {
-            console.error('解析 SSE 行失败:', line, e)
+            console.error('解析 SSE 失败:', line, e)
           }
         }
       }
     }
   } catch (error) {
-    console.error('流式重构接口错误:', error)
-    agentLogs.value.push({ type: 'error', message: `网络或接口调用异常: ${error}` })
+    console.error('SSE Error:', error)
+    agentLogs.value.push({ type: 'error', message: `错误: ${error}` })
+    if (chatMessages.value[agentMessageIndex]) {
+      chatMessages.value[agentMessageIndex].text = `[重构失败] 无法完成此次对话，请检查后端运行状态。`
+    }
   } finally {
     isRefactoring.value = false
   }
+}
+
+// 首次重构提交
+const handleInitialRefactor = () => {
+  if (!sourceCode.value.trim()) {
+    alert('请输入代码内容或路径！')
+    return
+  }
+  sendStreamRequest(sourceCode.value, true)
+}
+
+// 连续多轮对话提交
+const handleSendChatMessage = () => {
+  if (!userChatInput.value.trim() || isRefactoring.value) {
+    return
+  }
+  const userText = userChatInput.value
+  chatMessages.value.push({ role: 'user', text: userText })
+  userChatInput.value = ''
+  
+  // 触发流式，作为 follow-up 信息发给 backend
+  sendStreamRequest(userText, false)
 }
 </script>
 
 <template>
   <div class="app-container">
     <header class="header">
-      <h1>🚀 Refactor-Agent (阶段 3)</h1>
-      <p>Python 智能代码重构助手 —— 引入文件工具调用、测试自动运行 & 智能日志反馈</p>
+      <h1>🚀 Refactor-Agent (阶段 4)</h1>
+      <p>Python 智能重构智能体 —— 引入 LangGraph 状态机与多轮会话记忆体系</p>
     </header>
 
     <main class="main-content">
-      <!-- 左侧：输入面板 -->
-      <div class="editor-panel">
-        <div class="panel-header">
-          <h3>源代码或文件路径 (Source Code / File Path)</h3>
-        </div>
-        <textarea
-          v-model="sourceCode"
-          class="code-textarea"
-          placeholder="在此输入需要重构的 Python 代码，或者输入要修改的本地路径（如: backend/CodeSmells/Calculator.py）"
-        ></textarea>
-      </div>
-
-      <!-- 中间：控制按钮 -->
-      <div class="action-panel">
-        <button
-          @click="handleRefactorStream"
-          :disabled="isRefactoring"
-          class="refactor-btn"
-        >
-          <span v-if="isRefactoring" class="spinner"></span>
-          {{ isRefactoring ? '智能体运作中...' : '开始重构 👉' }}
-        </button>
-      </div>
-
-      <!-- 右侧：包含日志面板和代码高亮面板 -->
-      <div class="right-display-container">
-        <!-- 右侧上部：智能体执行日志 -->
-        <div class="panel-half logs-panel">
+      <!-- 栏 1：控制与初始输入 -->
+      <div class="column col-control">
+        <div class="panel">
           <div class="panel-header">
-            <h3>🛠️ Agent 思考与执行日志</h3>
+            <h3>⚙️ 初始代码/本地文件</h3>
+          </div>
+          <div class="panel-body flex-column">
+            <textarea
+              v-model="sourceCode"
+              class="code-textarea"
+              placeholder="在此粘贴代码或填入本地路径（如: backend/CodeSmells/Calculator.py）"
+            ></textarea>
+            
+            <button
+              @click="handleInitialRefactor"
+              :disabled="isRefactoring"
+              class="action-btn initial-btn"
+            >
+              <span v-if="isRefactoring" class="spinner"></span>
+              {{ isRefactoring ? '分析重构中...' : '提交初始重构 👉' }}
+            </button>
+          </div>
+        </div>
+
+        <!-- 阶段 4 记忆卡片 -->
+        <div class="panel session-card">
+          <div class="panel-header">
+            <h3>💾 会话记忆控制</h3>
+          </div>
+          <div class="panel-body">
+            <div class="session-info">
+              <span class="label">会话 ID:</span>
+              <code class="session-id">{{ threadId }}</code>
+            </div>
+            <button @click="handleNewSession" class="action-btn new-session-btn">
+              🔄 开启新会话 (重置记忆)
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 栏 2：多轮 Chat 对话区 -->
+      <div class="column col-chat">
+        <div class="panel chat-panel">
+          <div class="panel-header">
+            <h3>💬 多轮交互重构对话</h3>
+          </div>
+          
+          <div ref="chatContainerRef" class="chat-body">
+            <div v-if="chatMessages.length === 0" class="empty-chat">
+              请先在左侧提交初始重构。重构完成后，你可以在此处连续对 Agent 发送追问（例如：“再重命名 add 方法”、“写一个对应的单元测试”）。
+            </div>
+            
+            <div
+              v-for="(msg, index) in chatMessages"
+              :key="index"
+              :class="['chat-bubble', msg.role]"
+            >
+              <div class="avatar">{{ msg.role === 'user' ? '👤 用户' : '🤖 Agent' }}</div>
+              <pre class="bubble-text">{{ msg.text }}</pre>
+            </div>
+          </div>
+
+          <div class="chat-footer">
+            <input
+              v-model="userChatInput"
+              @keydown.enter="handleSendChatMessage"
+              :disabled="isRefactoring || chatMessages.length === 0"
+              type="text"
+              placeholder="发送后续重构修改建议（例如: 优化代码结构、重命名变量等）..."
+              class="chat-input"
+            />
+            <button
+              @click="handleSendChatMessage"
+              :disabled="isRefactoring || !userChatInput.trim() || chatMessages.length === 0"
+              class="chat-send-btn"
+            >
+              发送
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 栏 3：日志与最新代码 -->
+      <div class="column col-display">
+        <!-- 3-1: 运行日志 -->
+        <div class="panel display-half">
+          <div class="panel-header">
+            <h3>🛠️ Agent 思考与工具调用日志</h3>
           </div>
           <div ref="logContainerRef" class="log-content">
             <div v-if="agentLogs.length === 0" class="empty-logs">
-              等待 Agent 执行。如果是本地路径，Agent 会自动：读取文件 -> 分析重构 -> 写回文件 -> 运行测试
+              等待 Agent 执行操作...
             </div>
             <div
               v-for="(log, idx) in agentLogs"
@@ -160,10 +283,10 @@ const handleRefactorStream = async () => {
           </div>
         </div>
 
-        <!-- 右侧下部：重构后代码 -->
-        <div class="panel-half code-panel">
+        <!-- 3-2: 最新高亮代码 -->
+        <div class="panel display-half">
           <div class="panel-header">
-            <h3>📄 重构后结果 (Refactored Code)</h3>
+            <h3>📄 重构后最新完整代码</h3>
           </div>
           <div class="code-viewer-container">
             <pre class="code-viewer"><code v-html="highlightedCode" class="hljs language-python"></code></pre>
@@ -185,7 +308,7 @@ const handleRefactorStream = async () => {
 }
 
 .header {
-  padding: 1rem 2rem;
+  padding: 0.8rem 2rem;
   background-color: #2d2d2d;
   border-bottom: 1px solid #3d3d3d;
   text-align: center;
@@ -193,44 +316,49 @@ const handleRefactorStream = async () => {
 
 .header h1 {
   margin: 0;
-  font-size: 1.8rem;
+  font-size: 1.6rem;
   color: #4fc08d;
 }
 
 .header p {
-  margin: 0.5rem 0 0;
-  font-size: 1rem;
+  margin: 0.3rem 0 0;
+  font-size: 0.9rem;
   color: #9cdcfe;
 }
 
 .main-content {
   display: flex;
   flex: 1;
-  padding: 1rem;
-  gap: 1rem;
+  padding: 0.8rem;
+  gap: 0.8rem;
   overflow: hidden;
 }
 
-.editor-panel {
-  flex: 1;
+/* 栏容器规划 */
+.column {
   display: flex;
   flex-direction: column;
-  background-color: #252526;
-  border: 1px solid #3d3d3d;
-  border-radius: 8px;
-  overflow: hidden;
-}
-
-.right-display-container {
-  flex: 1.2;
-  display: flex;
-  flex-direction: column;
-  gap: 1rem;
+  gap: 0.8rem;
   height: 100%;
 }
 
-.panel-half {
-  flex: 1;
+.col-control {
+  flex: 1; /* 25% */
+  min-width: 250px;
+}
+
+.col-chat {
+  flex: 1.4; /* 35% */
+  min-width: 320px;
+}
+
+.col-display {
+  flex: 1.6; /* 40% */
+  min-width: 380px;
+}
+
+/* 容器/面板规范 */
+.panel {
   display: flex;
   flex-direction: column;
   background-color: #252526;
@@ -247,22 +375,203 @@ const handleRefactorStream = async () => {
 
 .panel-header h3 {
   margin: 0;
-  font-size: 1rem;
+  font-size: 0.95rem;
   color: #dcdcaa;
+}
+
+.panel-body {
+  padding: 0.8rem;
+  flex: 1;
+}
+
+.flex-column {
+  display: flex;
+  flex-direction: column;
+}
+
+/* 控制栏专属 */
+.col-control .panel:first-child {
+  flex: 1;
 }
 
 .code-textarea {
   flex: 1;
   width: 100%;
-  padding: 1rem;
+  padding: 0.8rem;
   background-color: #1e1e1e;
   color: #d4d4d4;
-  border: none;
+  border: 1px solid #333;
+  border-radius: 4px;
   resize: none;
-  font-family: 'Fira Code', 'Courier New', Courier, monospace;
-  font-size: 14px;
-  line-height: 1.5;
+  font-family: 'Fira Code', 'Courier New', monospace;
+  font-size: 13px;
+  line-height: 1.4;
   outline: none;
+  margin-bottom: 0.8rem;
+}
+
+.session-card {
+  background-color: #202021;
+}
+
+.session-info {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.8rem;
+}
+
+.session-info .label {
+  font-size: 0.85rem;
+  color: #888;
+}
+
+.session-id {
+  font-family: monospace;
+  background-color: #111;
+  padding: 0.2rem 0.4rem;
+  border-radius: 4px;
+  color: #ffaa00;
+  font-size: 0.85rem;
+}
+
+.action-btn {
+  padding: 0.7rem 1.2rem;
+  font-size: 0.95rem;
+  font-weight: bold;
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.initial-btn {
+  background-color: #4fc08d;
+}
+
+.initial-btn:hover:not(:disabled) {
+  background-color: #3aa876;
+}
+
+.new-session-btn {
+  background-color: #3c3c3c;
+  width: 100%;
+}
+
+.new-session-btn:hover {
+  background-color: #4c4c4c;
+}
+
+/* 聊天栏专属 */
+.chat-panel {
+  flex: 1;
+}
+
+.chat-body {
+  flex: 1;
+  padding: 1rem;
+  overflow-y: auto;
+  background-color: #1a1a1b;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.empty-chat {
+  color: #555;
+  font-style: italic;
+  text-align: center;
+  margin-top: 4rem;
+  font-size: 0.9rem;
+  line-height: 1.6;
+}
+
+.chat-bubble {
+  display: flex;
+  flex-direction: column;
+  max-width: 90%;
+  padding: 0.8rem;
+  border-radius: 8px;
+  animation: fadeIn 0.2s ease;
+}
+
+.chat-bubble.user {
+  align-self: flex-end;
+  background-color: #0b533e;
+  color: #fff;
+}
+
+.chat-bubble.agent {
+  align-self: flex-start;
+  background-color: #2d2d30;
+  color: #d4d4d4;
+  border: 1px solid #3d3d3d;
+}
+
+.chat-bubble .avatar {
+  font-size: 0.75rem;
+  font-weight: bold;
+  color: #888;
+  margin-bottom: 0.3rem;
+}
+
+.chat-bubble.user .avatar {
+  color: #4fc08d;
+  align-self: flex-end;
+}
+
+.bubble-text {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-family: inherit;
+  font-size: 13.5px;
+  line-height: 1.4;
+}
+
+.chat-footer {
+  display: flex;
+  padding: 0.6rem;
+  background-color: #2d2d2d;
+  border-top: 1px solid #3d3d3d;
+  gap: 0.5rem;
+}
+
+.chat-input {
+  flex: 1;
+  background-color: #1e1e1e;
+  border: 1px solid #3d3d3d;
+  border-radius: 4px;
+  color: #d4d4d4;
+  padding: 0.6rem;
+  font-size: 0.9rem;
+  outline: none;
+}
+
+.chat-send-btn {
+  background-color: #4fc08d;
+  color: white;
+  border: none;
+  padding: 0.6rem 1.2rem;
+  font-weight: bold;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.chat-send-btn:hover:not(:disabled) {
+  background-color: #3aa876;
+}
+
+.chat-send-btn:disabled {
+  background-color: #555;
+  color: #888;
+  cursor: not-allowed;
+}
+
+/* 展示栏专属 */
+.display-half {
+  flex: 1;
 }
 
 /* 终端风格的日志样式 */
@@ -277,15 +586,15 @@ const handleRefactorStream = async () => {
 }
 
 .empty-logs {
-  color: #555;
+  color: #444;
   font-style: italic;
   text-align: center;
   margin-top: 2rem;
 }
 
 .log-item {
-  margin-bottom: 0.6rem;
-  padding-bottom: 0.6rem;
+  margin-bottom: 0.5rem;
+  padding-bottom: 0.5rem;
   border-bottom: 1px dashed #222;
 }
 
@@ -320,7 +629,7 @@ const handleRefactorStream = async () => {
   flex: 1;
   background-color: #1e1e1e;
   overflow: auto;
-  padding: 1rem;
+  padding: 0.8rem;
 }
 
 .code-viewer {
@@ -330,62 +639,32 @@ const handleRefactorStream = async () => {
 
 .code-viewer code {
   font-family: 'Fira Code', 'Courier New', Courier, monospace;
-  font-size: 14px;
-  line-height: 1.5;
+  font-size: 13px;
+  line-height: 1.4;
   background: transparent;
   padding: 0;
   display: block;
   white-space: pre;
 }
 
-.action-panel {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.refactor-btn {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 1rem 1.8rem;
-  font-size: 1.2rem;
-  font-weight: bold;
-  color: #fff;
-  background-color: #4fc08d;
-  border: none;
-  border-radius: 8px;
-  cursor: pointer;
-  transition: background-color 0.2s, transform 0.1s;
-  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
-}
-
-.refactor-btn:hover:not(:disabled) {
-  background-color: #3aa876;
-}
-
-.refactor-btn:active:not(:disabled) {
-  transform: scale(0.98);
-}
-
-.refactor-btn:disabled {
-  background-color: #555555;
-  cursor: not-allowed;
-  color: #888888;
-}
-
+/* Spinner */
 .spinner {
-  width: 18px;
-  height: 18px;
-  border: 3px solid rgba(255, 255, 255, 0.3);
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
   border-top-color: #fff;
   border-radius: 50%;
   animation: spin 1s linear infinite;
+  margin-right: 0.3rem;
 }
 
 @keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
+  to { transform: rotate(360deg); }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(5px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 </style>
