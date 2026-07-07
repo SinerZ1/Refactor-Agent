@@ -1,8 +1,10 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import uvicorn
-from agent_core import simple_refactor
+import json
+from agent_core import simple_refactor, stream_refactor
 
 app = FastAPI(title="Refactor-Agent Backend")
 
@@ -39,6 +41,18 @@ def refactor_code(request: RefactorRequest):
         original_code=request.code,
         refactored_code=refactored_result
     )
+
+@app.post("/api/refactor/stream")
+def refactor_code_stream(request: RefactorRequest):
+    """
+    流式接收重构代码，返回 SSE (Server-Sent Events) 流
+    """
+    def event_generator():
+        for token in stream_refactor(request.code):
+            # 将每个 token 序列化为 JSON 以便前端解析
+            yield f"data: {json.dumps({'token': token})}\n\n"
+    
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 if __name__ == "__main__":
     uvicorn.run("app:app", host="127.0.0.1", port=8000, reload=True)

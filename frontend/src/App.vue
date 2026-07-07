@@ -1,21 +1,36 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, computed } from 'vue'
+import hljs from 'highlight.js'
+import 'highlight.js/styles/vs2015.css' // 使用 VS2015 深色代码高亮主题
 
 const sourceCode = ref('')
 const refactoredCode = ref('')
 const isRefactoring = ref(false)
 
-const handleRefactor = async () => {
+// 计算属性：利用 highlight.js 对生成的代码进行实时语法高亮
+const highlightedCode = computed(() => {
+  if (!refactoredCode.value) {
+    return '<span style="color: #6a9955;"># 重构后的代码将显示在这里...</span>'
+  }
+  try {
+    return hljs.highlight(refactoredCode.value, { language: 'python' }).value
+  } catch (error) {
+    console.error('Highlight error:', error)
+    return refactoredCode.value
+  }
+})
+
+const handleRefactorStream = async () => {
   if (!sourceCode.value.trim()) {
     alert('请输入需要重构的代码！')
     return
   }
 
   isRefactoring.value = true
-  refactoredCode.value = '重构中，请稍候...'
+  refactoredCode.value = '' // 清空之前的内容，准备流式写入
 
   try {
-    const response = await fetch('http://127.0.0.1:8000/api/refactor', {
+    const response = await fetch('http://127.0.0.1:8000/api/refactor/stream', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
@@ -27,10 +42,44 @@ const handleRefactor = async () => {
       throw new Error(`HTTP error! status: ${response.status}`)
     }
 
-    const data = await response.json()
-    refactoredCode.value = data.refactored_code
+    const reader = response.body?.getReader()
+    const decoder = new TextDecoder()
+    if (!reader) {
+      throw new Error('未获取到 Stream Reader')
+    }
+
+    let buffer = ''
+    while (true) {
+      const { value, done } = await reader.read()
+      if (done) {
+        break
+      }
+
+      // 解码当前数据块并拼接到缓存区
+      buffer += decoder.decode(value, { stream: true })
+      
+      // 按 SSE 的双换行符分割事件
+      const lines = buffer.split('\n\n')
+      // 最后一个元素可能是未接收完整的行，留给下一次拼接
+      buffer = lines.pop() || ''
+
+      for (const line of lines) {
+        if (line.trim().startsWith('data: ')) {
+          try {
+            const jsonStr = line.replace(/^data:\s*/, '')
+            const parsed = JSON.parse(jsonStr)
+            if (parsed.token) {
+              // 实时追加 Token，触发 Vue 的响应式更新和计算属性高亮
+              refactoredCode.value += parsed.token
+            }
+          } catch (e) {
+            console.error('解析 SSE 行失败:', line, e)
+          }
+        }
+      }
+    }
   } catch (error) {
-    console.error('Refactor API error:', error)
+    console.error('流式重构接口错误:', error)
     refactoredCode.value = `# [重构失败]\n# 请确保后端服务已在 127.0.0.1:8000 运行\n# 错误信息: ${error}`
   } finally {
     isRefactoring.value = false
@@ -41,11 +90,12 @@ const handleRefactor = async () => {
 <template>
   <div class="app-container">
     <header class="header">
-      <h1>🚀 Refactor-Agent (阶段 1)</h1>
-      <p>Python 极简代码重构助手</p>
+      <h1>🚀 Refactor-Agent (阶段 2)</h1>
+      <p>Python 智能代码重构助手 —— 实时流式输出 & 代码语法高亮</p>
     </header>
 
     <main class="main-content">
+      <!-- 左侧：源代码输入 -->
       <div class="editor-panel">
         <div class="panel-header">
           <h3>源代码 (Source Code)</h3>
@@ -53,30 +103,30 @@ const handleRefactor = async () => {
         <textarea
           v-model="sourceCode"
           class="code-textarea"
-          placeholder="在此粘贴你需要重构的 Python 代码..."
+          placeholder="在此粘贴或输入需要重构的 Python 代码..."
         ></textarea>
       </div>
 
+      <!-- 中间：重构动作控制 -->
       <div class="action-panel">
         <button
-          @click="handleRefactor"
+          @click="handleRefactorStream"
           :disabled="isRefactoring"
           class="refactor-btn"
         >
-          {{ isRefactoring ? '重构中...' : '开始重构 👉' }}
+          <span v-if="isRefactoring" class="spinner"></span>
+          {{ isRefactoring ? '流式重构中...' : '开始重构 👉' }}
         </button>
       </div>
 
+      <!-- 右侧：重构结果展示 (高亮) -->
       <div class="editor-panel">
         <div class="panel-header">
           <h3>重构后 (Refactored)</h3>
         </div>
-        <textarea
-          v-model="refactoredCode"
-          class="code-textarea result-textarea"
-          readonly
-          placeholder="重构后的代码将显示在这里..."
-        ></textarea>
+        <div class="code-viewer-container">
+          <pre class="code-viewer"><code v-html="highlightedCode" class="hljs language-python"></code></pre>
+        </div>
       </div>
     </main>
   </div>
@@ -155,8 +205,27 @@ const handleRefactor = async () => {
   outline: none;
 }
 
-.result-textarea {
-  background-color: #1a1a1a;
+/* 语法高亮预览面板样式 */
+.code-viewer-container {
+  flex: 1;
+  background-color: #1e1e1e;
+  overflow: auto;
+  padding: 1rem;
+}
+
+.code-viewer {
+  margin: 0;
+  background: transparent;
+}
+
+.code-viewer code {
+  font-family: 'Fira Code', 'Courier New', Courier, monospace;
+  font-size: 14px;
+  line-height: 1.5;
+  background: transparent;
+  padding: 0;
+  display: block;
+  white-space: pre;
 }
 
 .action-panel {
@@ -166,7 +235,10 @@ const handleRefactor = async () => {
 }
 
 .refactor-btn {
-  padding: 1rem 2rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 1rem 1.8rem;
   font-size: 1.2rem;
   font-weight: bold;
   color: #fff;
@@ -174,7 +246,7 @@ const handleRefactor = async () => {
   border: none;
   border-radius: 8px;
   cursor: pointer;
-  transition: background-color 0.2s;
+  transition: background-color 0.2s, transform 0.1s;
   box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
 }
 
@@ -182,9 +254,29 @@ const handleRefactor = async () => {
   background-color: #3aa876;
 }
 
+.refactor-btn:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
 .refactor-btn:disabled {
   background-color: #555555;
   cursor: not-allowed;
   color: #888888;
+}
+
+/* Loading 旋转动画 */
+.spinner {
+  width: 18px;
+  height: 18px;
+  border: 3px solid rgba(255, 255, 255, 0.3);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 </style>

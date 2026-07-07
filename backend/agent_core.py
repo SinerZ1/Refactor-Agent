@@ -24,8 +24,7 @@ settings = Settings()
 if settings.use_vertex:
     llm = ChatGoogleGenerativeAI(
         model=settings.vertex_model_name,
-        # langchain_google_genai ChatGoogleGenerativeAI may not accept `project` argument directly. 
-        # If ADC is working, the SDK automatically picks up the project from the environment.
+        project=settings.vertex_project,
         temperature=0.2,
     )
 else:
@@ -75,3 +74,29 @@ def simple_refactor(code: str) -> str:
         return str(response)
     except Exception as e:
         return f"# [调用模型失败]\n# 错误信息: {str(e)}\n# 请检查你的网络或 API Key / Base URL 配置。"
+
+def stream_refactor(code: str):
+    """
+    流式重构代码，逐步产出 Token
+    """
+    if not settings.use_vertex and (not settings.openai_api_key or settings.openai_api_key == "your_api_key_here"):
+        yield "# [错误] 请在 backend/.env 文件中配置你的 API 密钥。"
+        return
+        
+    try:
+        for chunk in refactor_chain.stream({"code": code}):
+            if hasattr(chunk, 'content'):
+                content = chunk.content
+                if isinstance(content, str):
+                    yield content
+                elif isinstance(content, list):
+                    chunk_text = "".join(
+                        block.get("text", "") 
+                        for block in content 
+                        if isinstance(block, dict) and block.get("type") == "text"
+                    )
+                    yield chunk_text
+            else:
+                yield str(chunk)
+    except Exception as e:
+        yield f"\n# [流式调用模型失败]\n# 错误信息: {str(e)}\n# 请检查你的网络或 API Key / Base URL 配置。"
