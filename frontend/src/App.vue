@@ -1,16 +1,17 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, nextTick, watch } from 'vue'
 import hljs from 'highlight.js'
 import 'highlight.js/styles/vs2015.css' // 使用 VS2015 深色代码高亮主题
 
-const sourceCode = ref('')
+const sourceCode = ref('backend/CodeSmells/Calculator.py') // 默认填入要重构的测试文件路径
 const refactoredCode = ref('')
 const isRefactoring = ref(false)
+const agentLogs = ref<{ type: 'info' | 'success' | 'error'; message: string }[]>([])
 
 // 计算属性：利用 highlight.js 对生成的代码进行实时语法高亮
 const highlightedCode = computed(() => {
   if (!refactoredCode.value) {
-    return '<span style="color: #6a9955;"># 重构后的代码将显示在这里...</span>'
+    return '<span style="color: #6a9955;"># 重构后的代码将在此显示...</span>'
   }
   try {
     return hljs.highlight(refactoredCode.value, { language: 'python' }).value
@@ -20,14 +21,25 @@ const highlightedCode = computed(() => {
   }
 })
 
+// 监听日志变化，自动滚动到日志区域底部
+const logContainerRef = ref<HTMLDivElement | null>(null)
+watch(agentLogs, () => {
+  nextTick(() => {
+    if (logContainerRef.value) {
+      logContainerRef.value.scrollTop = logContainerRef.value.scrollHeight
+    }
+  })
+}, { deep: true })
+
 const handleRefactorStream = async () => {
   if (!sourceCode.value.trim()) {
-    alert('请输入需要重构的代码！')
+    alert('请输入需要重构的代码内容或本地文件路径！')
     return
   }
 
   isRefactoring.value = true
-  refactoredCode.value = '' // 清空之前的内容，准备流式写入
+  refactoredCode.value = '' 
+  agentLogs.value = [] // 清空之前的日志
 
   try {
     const response = await fetch('http://127.0.0.1:8000/api/refactor/stream', {
@@ -55,12 +67,8 @@ const handleRefactorStream = async () => {
         break
       }
 
-      // 解码当前数据块并拼接到缓存区
       buffer += decoder.decode(value, { stream: true })
-      
-      // 按 SSE 的双换行符分割事件
       const lines = buffer.split('\n\n')
-      // 最后一个元素可能是未接收完整的行，留给下一次拼接
       buffer = lines.pop() || ''
 
       for (const line of lines) {
@@ -69,8 +77,19 @@ const handleRefactorStream = async () => {
             const jsonStr = line.replace(/^data:\s*/, '')
             const parsed = JSON.parse(jsonStr)
             if (parsed.token) {
-              // 实时追加 Token，触发 Vue 的响应式更新和计算属性高亮
-              refactoredCode.value += parsed.token
+              const token = parsed.token
+              
+              // 匹配阶段 3 的日志前缀，拦截并呈现在日志面板中
+              if (token.startsWith('[INFO]')) {
+                agentLogs.value.push({ type: 'info', message: token.replace('[INFO]', '').trim() })
+              } else if (token.startsWith('[SUCCESS]')) {
+                agentLogs.value.push({ type: 'success', message: token.replace('[SUCCESS]', '').trim() })
+              } else if (token.startsWith('[ERROR]')) {
+                agentLogs.value.push({ type: 'error', message: token.replace('[ERROR]', '').trim() })
+              } else {
+                // 如果不是日志，则是最终代码 Token，流入代码显示区域
+                refactoredCode.value += token
+              }
             }
           } catch (e) {
             console.error('解析 SSE 行失败:', line, e)
@@ -80,7 +99,7 @@ const handleRefactorStream = async () => {
     }
   } catch (error) {
     console.error('流式重构接口错误:', error)
-    refactoredCode.value = `# [重构失败]\n# 请确保后端服务已在 127.0.0.1:8000 运行\n# 错误信息: ${error}`
+    agentLogs.value.push({ type: 'error', message: `网络或接口调用异常: ${error}` })
   } finally {
     isRefactoring.value = false
   }
@@ -90,24 +109,24 @@ const handleRefactorStream = async () => {
 <template>
   <div class="app-container">
     <header class="header">
-      <h1>🚀 Refactor-Agent (阶段 2)</h1>
-      <p>Python 智能代码重构助手 —— 实时流式输出 & 代码语法高亮</p>
+      <h1>🚀 Refactor-Agent (阶段 3)</h1>
+      <p>Python 智能代码重构助手 —— 引入文件工具调用、测试自动运行 & 智能日志反馈</p>
     </header>
 
     <main class="main-content">
-      <!-- 左侧：源代码输入 -->
+      <!-- 左侧：输入面板 -->
       <div class="editor-panel">
         <div class="panel-header">
-          <h3>源代码 (Source Code)</h3>
+          <h3>源代码或文件路径 (Source Code / File Path)</h3>
         </div>
         <textarea
           v-model="sourceCode"
           class="code-textarea"
-          placeholder="在此粘贴或输入需要重构的 Python 代码..."
+          placeholder="在此输入需要重构的 Python 代码，或者输入要修改的本地路径（如: backend/CodeSmells/Calculator.py）"
         ></textarea>
       </div>
 
-      <!-- 中间：重构动作控制 -->
+      <!-- 中间：控制按钮 -->
       <div class="action-panel">
         <button
           @click="handleRefactorStream"
@@ -115,17 +134,40 @@ const handleRefactorStream = async () => {
           class="refactor-btn"
         >
           <span v-if="isRefactoring" class="spinner"></span>
-          {{ isRefactoring ? '流式重构中...' : '开始重构 👉' }}
+          {{ isRefactoring ? '智能体运作中...' : '开始重构 👉' }}
         </button>
       </div>
 
-      <!-- 右侧：重构结果展示 (高亮) -->
-      <div class="editor-panel">
-        <div class="panel-header">
-          <h3>重构后 (Refactored)</h3>
+      <!-- 右侧：包含日志面板和代码高亮面板 -->
+      <div class="right-display-container">
+        <!-- 右侧上部：智能体执行日志 -->
+        <div class="panel-half logs-panel">
+          <div class="panel-header">
+            <h3>🛠️ Agent 思考与执行日志</h3>
+          </div>
+          <div ref="logContainerRef" class="log-content">
+            <div v-if="agentLogs.length === 0" class="empty-logs">
+              等待 Agent 执行。如果是本地路径，Agent 会自动：读取文件 -> 分析重构 -> 写回文件 -> 运行测试
+            </div>
+            <div
+              v-for="(log, idx) in agentLogs"
+              :key="idx"
+              :class="['log-item', log.type]"
+            >
+              <span class="log-time">[{{ new Date().toLocaleTimeString() }}]</span>
+              <pre class="log-message">{{ log.message }}</pre>
+            </div>
+          </div>
         </div>
-        <div class="code-viewer-container">
-          <pre class="code-viewer"><code v-html="highlightedCode" class="hljs language-python"></code></pre>
+
+        <!-- 右侧下部：重构后代码 -->
+        <div class="panel-half code-panel">
+          <div class="panel-header">
+            <h3>📄 重构后结果 (Refactored Code)</h3>
+          </div>
+          <div class="code-viewer-container">
+            <pre class="code-viewer"><code v-html="highlightedCode" class="hljs language-python"></code></pre>
+          </div>
         </div>
       </div>
     </main>
@@ -179,15 +221,33 @@ const handleRefactorStream = async () => {
   overflow: hidden;
 }
 
+.right-display-container {
+  flex: 1.2;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  height: 100%;
+}
+
+.panel-half {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  background-color: #252526;
+  border: 1px solid #3d3d3d;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
 .panel-header {
-  padding: 0.8rem;
+  padding: 0.6rem 0.8rem;
   background-color: #333333;
   border-bottom: 1px solid #3d3d3d;
 }
 
 .panel-header h3 {
   margin: 0;
-  font-size: 1.1rem;
+  font-size: 1rem;
   color: #dcdcaa;
 }
 
@@ -205,7 +265,57 @@ const handleRefactorStream = async () => {
   outline: none;
 }
 
-/* 语法高亮预览面板样式 */
+/* 终端风格的日志样式 */
+.log-content {
+  flex: 1;
+  background-color: #111;
+  padding: 0.8rem;
+  overflow-y: auto;
+  font-family: 'Fira Code', 'Courier New', monospace;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.empty-logs {
+  color: #555;
+  font-style: italic;
+  text-align: center;
+  margin-top: 2rem;
+}
+
+.log-item {
+  margin-bottom: 0.6rem;
+  padding-bottom: 0.6rem;
+  border-bottom: 1px dashed #222;
+}
+
+.log-item.info {
+  color: #9cdcfe;
+}
+
+.log-item.success {
+  color: #4fc08d;
+}
+
+.log-item.error {
+  color: #f44336;
+}
+
+.log-time {
+  color: #555;
+  margin-right: 0.5rem;
+}
+
+.log-message {
+  margin: 0.2rem 0 0;
+  white-space: pre-wrap;
+  word-break: break-all;
+  background: transparent;
+  padding: 0;
+  font-family: inherit;
+}
+
+/* 代码区域样式 */
 .code-viewer-container {
   flex: 1;
   background-color: #1e1e1e;
@@ -264,7 +374,6 @@ const handleRefactorStream = async () => {
   color: #888888;
 }
 
-/* Loading 旋转动画 */
 .spinner {
   width: 18px;
   height: 18px;
