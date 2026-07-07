@@ -81,12 +81,15 @@ def run_unit_tests(test_command: str = "pytest") -> str:
     执行本项目的测试命令（例如 pytest）来运行单元测试，验证重构后的代码是否符合质量标准。
     """
     try:
+        # Windows 控制台的默认输出可能是 GBK。若运行在 Windows (nt) 下，使用 gbk 解析输出，Linux/Mac 依旧使用 utf-8。
+        encoding_format = "gbk" if os.name == "nt" else "utf-8"
         result = subprocess.run(
             test_command,
             shell=True,
             capture_output=True,
             text=True,
-            encoding="utf-8",
+            encoding=encoding_format,
+            errors="replace", # 安全替换无法解码的字节，防止在 thread_reader 中触发 UnicodeDecodeError
             timeout=20
         )
         output = (result.stdout or "") + "\n" + (result.stderr or "")

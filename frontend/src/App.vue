@@ -4,7 +4,7 @@ import hljs from 'highlight.js'
 import 'highlight.js/styles/vs2015.css' // 使用 VS2015 深色代码高亮主题
 
 // 基础状态
-const sourceCode = ref('backend/CodeSmells/Calculator.py') // 默认要重构的测试文件路径
+const sourceCode = ref('CodeSmells/main.py') // 默认要重构的测试文件路径
 const refactoredCode = ref('')
 const isRefactoring = ref(false)
 const agentLogs = ref<{ type: 'info' | 'success' | 'error'; message: string }[]>([])

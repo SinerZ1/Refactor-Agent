@@ -4,14 +4,23 @@ import ast
 # 全局内存符号索引：用于存储项目里类与函数的定义
 SYMBOL_INDEX = {}
 
-def index_directory(directory_path: str = "backend/CodeSmells"):
+def index_directory(directory_path: str = "CodeSmells"):
     """
     利用 Python ast (抽象语法树) 静态解析目录下的所有 python 文件，提取类和函数定义
     """
     global SYMBOL_INDEX
     SYMBOL_INDEX.clear()
     
+    # 动态适应工作目录：如果是从 backend 目录下运行，符号目录应该在 ../CodeSmells
     if not os.path.exists(directory_path):
+        if os.path.exists("../CodeSmells"):
+            directory_path = "../CodeSmells"
+        elif os.path.exists("backend/CodeSmells"):
+            directory_path = "backend/CodeSmells"
+        else:
+            return
+            
+    if False: # 跳过原有的检测逻辑
         # 兼容单独在 backend 目录下运行的情况
         if directory_path.startswith("backend/") and os.path.exists(directory_path.replace("backend/", "")):
             directory_path = directory_path.replace("backend/", "")
@@ -59,10 +68,12 @@ def get_symbol_definition_content(symbol_name: str) -> str:
     
     # 动态扫描两个默认路径 (兼容根目录启动和 backend 目录下启动)
     if not SYMBOL_INDEX:
-        if os.path.exists("backend/CodeSmells"):
-            index_directory("backend/CodeSmells")
-        elif os.path.exists("CodeSmells"):
+        if os.path.exists("CodeSmells"):
             index_directory("CodeSmells")
+        elif os.path.exists("../CodeSmells"):
+            index_directory("../CodeSmells")
+        elif os.path.exists("backend/CodeSmells"):
+            index_directory("backend/CodeSmells")
             
     symbol = SYMBOL_INDEX.get(symbol_name)
     if symbol:
