@@ -34,12 +34,13 @@ def stream_refactor(code: str, thread_id: str = "default_session", config: dict 
         run_config["configurable"].update(config["configurable"])
 
     current_state = app_graph.get_state(run_config)
-    
+
     # 阶段 2：检测是否处于挂起（Interrupt）状态，并根据是否有 resume_value 执行恢复运行
     if current_state.interrupts:
         resume_value = run_config["configurable"].get("resume_value")
         if resume_value is not None:
             from langgraph.types import Command
+
             stream_input = Command(resume=resume_value)
         else:
             # 如果处于挂起状态但未传 approval 状态，则终止流，防止重复触发
@@ -47,7 +48,12 @@ def stream_refactor(code: str, thread_id: str = "default_session", config: dict 
             return
     else:
         if not current_state.values or not current_state.values.get("messages"):
-            stream_input = {"messages": [HumanMessage(content=f"请帮我处理以下代码或路径：\n\n{code}")], "retry_count": 0}
+            stream_input = {
+                "messages": [
+                    HumanMessage(content=f"请帮我处理以下代码或路径：\n\n{code}")
+                ],
+                "retry_count": 0,
+            }
         else:
             stream_input = {"messages": [HumanMessage(content=code)]}
 
@@ -76,18 +82,30 @@ def stream_refactor(code: str, thread_id: str = "default_session", config: dict 
                                 yield f"[INFO] {node_name.capitalize()} 决定调用工具 `{tc['name']}`，参数为: {json.dumps(tc['args'], ensure_ascii=False)}\n"
                         else:
                             # 阶段 3: A2A 多角色聊天室，通过 ws_callback 广播最终发言到 WebSocket 中
-                            sender_name = "CoderAgent" if node_name == "developer" else ("ReviewerAgent" if node_name == "reviewer" else "ArchitectAgent")
+                            sender_name = (
+                                "CoderAgent"
+                                if node_name == "developer"
+                                else (
+                                    "ReviewerAgent"
+                                    if node_name == "reviewer"
+                                    else "ArchitectAgent"
+                                )
+                            )
                             ws_callback = run_config["configurable"].get("ws_callback")
                             if ws_callback:
                                 try:
                                     loop = asyncio.get_event_loop()
                                     if loop.is_running():
                                         asyncio.run_coroutine_threadsafe(
-                                            ws_callback(thread_id, sender_name, msg.content),
-                                            loop
+                                            ws_callback(
+                                                thread_id, sender_name, msg.content
+                                            ),
+                                            loop,
                                         )
                                 except Exception as ex:
-                                    print(f"[stream_refactor] Failed to trigger A2A chat ws_callback: {ex}")
+                                    print(
+                                        f"[stream_refactor] Failed to trigger A2A chat ws_callback: {ex}"
+                                    )
 
                             # 最终回答，使用打字机流式效果输出
                             text_content = prefix + msg.content + "\n"

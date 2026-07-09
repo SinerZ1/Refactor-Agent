@@ -17,7 +17,7 @@ const fetchTopology = async () => {
     if (!res.ok) throw new Error('无法连接后端 API')
     const data = await res.json()
     isFallback.value = data.fallback || false
-    
+
     await nextTick()
     renderChart(data.nodes, data.links)
   } catch (err: any) {
@@ -30,7 +30,7 @@ const fetchTopology = async () => {
 
 const renderChart = (nodes: any[], links: any[]) => {
   if (!graphRef.value) return
-  
+
   if (!myChart) {
     myChart = echarts.init(graphRef.value)
   }
@@ -45,11 +45,11 @@ const renderChart = (nodes: any[], links: any[]) => {
       value: node.file_path,
       category: isClass ? 0 : 1,
       itemStyle: {
-        color: isClass ? '#4fc08d' : '#29b6f6'
+        color: isClass ? '#4fc08d' : '#29b6f6',
       },
       tooltip: {
-        formatter: `<strong>${node.name}</strong><br/>类型: ${node.type}<br/>位置: ${node.file_path}`
-      }
+        formatter: `<strong>${node.name}</strong><br/>类型: ${node.type}<br/>位置: ${node.file_path}`,
+      },
     }
   })
 
@@ -60,8 +60,8 @@ const renderChart = (nodes: any[], links: any[]) => {
       target: link.target,
       lineStyle: {
         width: 2,
-        curveness: 0.15
-      }
+        curveness: 0.15,
+      },
     }
   })
 
@@ -73,17 +73,17 @@ const renderChart = (nodes: any[], links: any[]) => {
       borderWidth: 1,
       textStyle: {
         color: '#fff',
-        fontSize: 12
-      }
+        fontSize: 12,
+      },
     },
     legend: [
       {
         data: ['类 (Class)', '函数 (Function)'],
         textStyle: {
-          color: '#ccc'
+          color: '#ccc',
         },
-        top: '5%'
-      }
+        top: '5%',
+      },
     ],
     series: [
       {
@@ -91,37 +91,34 @@ const renderChart = (nodes: any[], links: any[]) => {
         layout: 'force',
         data: formattedNodes,
         links: formattedLinks,
-        categories: [
-          { name: '类 (Class)' },
-          { name: '函数 (Function)' }
-        ],
+        categories: [{ name: '类 (Class)' }, { name: '函数 (Function)' }],
         roam: true,
         label: {
           show: true,
           position: 'right',
           color: '#ddd',
-          fontSize: 11
+          fontSize: 11,
         },
         force: {
           repulsion: 200,
           edgeLength: 120,
-          gravity: 0.05
+          gravity: 0.05,
         },
         edgeSymbol: ['none', 'arrow'],
         edgeSymbolSize: [4, 8],
         lineStyle: {
           color: '#888',
-          opacity: 0.6
+          opacity: 0.6,
         },
         emphasis: {
           focus: 'adjacency',
           lineStyle: {
             width: 4,
-            color: '#ffaa00'
-          }
-        }
-      }
-    ]
+            color: '#ffaa00',
+          },
+        },
+      },
+    ],
   }
 
   myChart.setOption(option)
@@ -142,7 +139,7 @@ onUnmounted(() => {
 })
 
 defineExpose({
-  refresh: fetchTopology
+  refresh: fetchTopology,
 })
 </script>
 
@@ -156,12 +153,12 @@ defineExpose({
         {{ loading ? '刷新中...' : '🔄 刷新图谱' }}
       </button>
     </div>
-    
+
     <div v-if="errorMsg" class="error-view">
       <p class="error-text">❌ 加载图谱失败: {{ errorMsg }}</p>
       <button @click="fetchTopology" class="retry-btn">重试</button>
     </div>
-    
+
     <div v-show="!errorMsg" ref="graphRef" class="graph-canvas"></div>
   </div>
 </template>

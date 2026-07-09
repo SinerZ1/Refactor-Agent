@@ -15,6 +15,7 @@ app = FastAPI(title="Refactor-Agent Backend")
 
 session_approvals: Dict[str, bool] = {}
 
+
 class ConnectionManager:
     def __init__(self):
         self.active_connections: Dict[str, WebSocket] = {}
@@ -33,9 +34,14 @@ class ConnectionManager:
         if thread_id in self.active_connections:
             try:
                 await self.active_connections[thread_id].send_json(message)
-                print(f"[WebSocket] Sent message to thread `{thread_id}`: {message.get('type')}")
+                print(
+                    f"[WebSocket] Sent message to thread `{thread_id}`: {message.get('type')}"
+                )
             except Exception as e:
-                print(f"[WebSocket] Failed to send message to thread `{thread_id}`: {e}")
+                print(
+                    f"[WebSocket] Failed to send message to thread `{thread_id}`: {e}"
+                )
+
 
 manager = ConnectionManager()
 
@@ -47,14 +53,14 @@ async def websocket_endpoint(websocket: WebSocket, thread_id: str):
         while True:
             data = await websocket.receive_json()
             print(f"[WebSocket] Received message from thread `{thread_id}`: {data}")
-            
+
             # 阶段 2: 处理审批放行/拒绝信号
             if data.get("type") == "approval_response":
                 approved = data.get("approved", False)
                 session_approvals[thread_id] = approved
                 await websocket.send_json({"type": "approval_confirmed"})
                 print(f"[WebSocket] Approval saved for `{thread_id}`: {approved}")
-                
+
     except WebSocketDisconnect:
         manager.disconnect(thread_id)
     except Exception as e:
@@ -66,11 +72,9 @@ async def send_chatroom_message(thread_id: str, sender: str, content: str):
     """
     阶段 3: A2A 多角色聊天室，将智能体的中间发言向 WebSocket 广播
     """
-    await manager.send_personal_message({
-        "type": "chatroom_message",
-        "sender": sender,
-        "content": content
-    }, thread_id)
+    await manager.send_personal_message(
+        {"type": "chatroom_message", "sender": sender, "content": content}, thread_id
+    )
 
 
 @app.on_event("startup")
@@ -131,7 +135,7 @@ def refactor_code(request: RefactorRequest):
     config = {
         "configurable": {
             "thread_id": request.thread_id,
-            "ws_callback": send_chatroom_message
+            "ws_callback": send_chatroom_message,
         }
     }
     if request.custom_model_config:
@@ -151,7 +155,7 @@ def refactor_code_stream(request: RefactorRequest):
     config = {
         "configurable": {
             "thread_id": request.thread_id,
-            "ws_callback": send_chatroom_message
+            "ws_callback": send_chatroom_message,
         }
     }
     if request.custom_model_config:
@@ -161,31 +165,36 @@ def refactor_code_stream(request: RefactorRequest):
     if request.thread_id in session_approvals:
         approved = session_approvals.pop(request.thread_id)
         config["configurable"]["resume_value"] = {"approved": approved}
-        print(f"[app] Resuming graph for thread `{request.thread_id}` with approved={approved}")
+        print(
+            f"[app] Resuming graph for thread `{request.thread_id}` with approved={approved}"
+        )
 
     def event_generator():
         for token in stream_refactor(request.code, request.thread_id, config):
             # 将每个 token 序列化为 JSON 以便前端解析
             yield f"data: {json.dumps({'token': token})}\n\n"
-            
+
         # 阶段 2：执行完毕后，检查是否产生了新的挂起（Interrupt）
         from agent import app_graph
+
         try:
             state = app_graph.get_state(config)
             if state.interrupts:
                 # 存在挂起中断（即 write_code_file 工具调用前暂停）
                 interrupt_payload = state.interrupts[0].value
-                print(f"[app] Graph suspended on interrupt for `{request.thread_id}`. Sending WS message.")
-                
+                print(
+                    f"[app] Graph suspended on interrupt for `{request.thread_id}`. Sending WS message."
+                )
+
                 # 线程安全地异步提交发送 WebSocket 消息给主事件循环
                 loop = asyncio.get_event_loop()
                 if loop.is_running():
                     asyncio.run_coroutine_threadsafe(
-                        manager.send_personal_message({
-                            "type": "approval_request",
-                            "payload": interrupt_payload
-                        }, request.thread_id),
-                        loop
+                        manager.send_personal_message(
+                            {"type": "approval_request", "payload": interrupt_payload},
+                            request.thread_id,
+                        ),
+                        loop,
                     )
         except Exception as e:
             print(f"[app] Failed to check state interrupts: {e}")

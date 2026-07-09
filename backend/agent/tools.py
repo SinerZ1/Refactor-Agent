@@ -39,27 +39,31 @@ def write_code_file(file_path: str, content: str) -> str:
                     original_code = f.read()
             except Exception:
                 pass
-                
+
         # 暂停状态机执行，向前端返回审批数据包。
         # 这里在底层相当于 Hello-Agents 课程中工具暂停返回人机协作决策状态。
         # 状态机此时会在 Checkpointer 中挂起并保存现场，恢复（resume）后，它将返回用户反馈的数据包。
-        approval_res = interrupt({
-            "type": "write_approval",
-            "file_path": file_path,
-            "original_code": original_code,
-            "refactored_code": content
-        })
-        
+        approval_res = interrupt(
+            {
+                "type": "write_approval",
+                "file_path": file_path,
+                "original_code": original_code,
+                "refactored_code": content,
+            }
+        )
+
         # 提取并验证前端返回的审批结果
         approved = False
         if isinstance(approval_res, bool):
             approved = approval_res
         elif isinstance(approval_res, dict):
             approved = approval_res.get("approved", False)
-            
+
         if not approved:
-            return f"写入文件 `{file_path}` 失败：用户在人机协作审批中点击拒绝，打回修改。"
-            
+            return (
+                f"写入文件 `{file_path}` 失败：用户在人机协作审批中点击拒绝，打回修改。"
+            )
+
         # 审批通过，执行本地写入
         dir_name = os.path.dirname(os.path.abspath(file_path))
         if dir_name:
