@@ -6,6 +6,7 @@ import uvicorn
 import json
 from agent_core import simple_refactor, stream_refactor
 from code_indexer import index_directory
+from graph_indexer import index_to_neo4j, get_topology_data
 
 app = FastAPI(title="Refactor-Agent Backend")
 
@@ -13,11 +14,16 @@ app = FastAPI(title="Refactor-Agent Backend")
 def startup_event():
     # 启动时自动静态扫描 CodeSmells 目录，构建 AST 符号索引
     index_directory()
+    # 启动时同时将代码库关系索引至 Neo4j 中
+    try:
+        index_to_neo4j()
+    except Exception as e:
+        print(f"[Startup] Neo4j 初始化图索引失败 (若未启动 Neo4j 服务请忽略，系统支持降级运行): {e}")
 
-# 配置 CORS，允许前端应用（如 Vite 默认端口 5173）访问
+# 配置 CORS，允许前端应用访问
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=["*"], # 允许所有源（开发环境方便调试）
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -60,6 +66,13 @@ def refactor_code_stream(request: RefactorRequest):
             yield f"data: {json.dumps({'token': token})}\n\n"
     
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+@app.get("/api/graph/topology")
+def get_graph_topology():
+    """
+    获取目前代码库的调用关系图拓扑数据，提供给前端可视化组件
+    """
+    return get_topology_data()
 
 if __name__ == "__main__":
     uvicorn.run("app:app", host="127.0.0.1", port=8000, reload=True)

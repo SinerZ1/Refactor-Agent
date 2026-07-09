@@ -1,0 +1,3 @@
+export GOOGLE_APPLICATION_CREDENTIALS=C:\Users\10900\AppData\Roaming\gcloud\application_default_credentials.json
+export GOOGLE_CLOUD_PROJECT=project-c756c615-f8ff-41ea-8a3
+export VERTEX_LOCATION=global

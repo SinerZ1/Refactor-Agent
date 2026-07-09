@@ -2,6 +2,7 @@
 import { ref, computed, nextTick, watch } from 'vue'
 import hljs from 'highlight.js'
 import 'highlight.js/styles/vs2015.css' // 使用 VS2015 深色代码高亮主题
+import TopologyGraph from './components/TopologyGraph.vue'
 
 // 基础状态
 const sourceCode = ref('CodeSmells/main.py') // 默认要重构的测试文件路径
@@ -13,6 +14,10 @@ const agentLogs = ref<{ type: 'info' | 'success' | 'error'; message: string }[]>
 const threadId = ref('session_' + Math.random().toString(36).substring(2, 9))
 const userChatInput = ref('')
 const chatMessages = ref<{ role: 'user' | 'agent'; text: string }[]>([])
+
+// 阶段 6: 视图切换和拓扑组件引用
+const activeTab = ref<'code' | 'topology'>('code')
+const topologyGraphRef = ref<InstanceType<typeof TopologyGraph> | null>(null)
 
 // 计算属性：利用 highlight.js 对生成的代码进行实时语法高亮
 const highlightedCode = computed(() => {
@@ -144,6 +149,10 @@ const sendStreamRequest = async (payloadText: string, isInitialTurn: boolean) =>
     }
   } finally {
     isRefactoring.value = false
+    // 流程结束后，自动刷新图谱以展示最新架构关系
+    nextTick(() => {
+      topologyGraphRef.value?.refresh()
+    })
   }
 }
 
@@ -173,8 +182,8 @@ const handleSendChatMessage = () => {
 <template>
   <div class="app-container">
     <header class="header">
-      <h1>🚀 Refactor-Agent (阶段 4)</h1>
-      <p>Python 智能重构智能体 —— 引入 LangGraph 状态机与多轮会话记忆体系</p>
+      <h1>🚀 Refactor-Agent (阶段 6)</h1>
+      <p>Multi-Agent 协同分布式架构重构智能体 —— LangGraph & Neo4j 依赖拓扑协同可视化</p>
     </header>
 
     <main class="main-content">
@@ -188,7 +197,7 @@ const handleSendChatMessage = () => {
             <textarea
               v-model="sourceCode"
               class="code-textarea"
-              placeholder="在此粘贴代码或填入本地路径（如: backend/CodeSmells/Calculator.py）"
+              placeholder="在此粘贴代码或填入本地路径（如: CodeSmells/main.py）"
             ></textarea>
             
             <button
@@ -261,35 +270,61 @@ const handleSendChatMessage = () => {
         </div>
       </div>
 
-      <!-- 栏 3：日志与最新代码 -->
+      <!-- 栏 3：日志与最新代码 / 拓扑图谱 (阶段 6 Tab页) -->
       <div class="column col-display">
-        <!-- 3-1: 运行日志 -->
-        <div class="panel display-half">
-          <div class="panel-header">
-            <h3>🛠️ Agent 思考与工具调用日志</h3>
-          </div>
-          <div ref="logContainerRef" class="log-content">
-            <div v-if="agentLogs.length === 0" class="empty-logs">
-              等待 Agent 执行操作...
+        <!-- Tab 切换头部 -->
+        <div class="tab-header">
+          <button 
+            :class="['tab-btn', activeTab === 'code' ? 'active' : '']" 
+            @click="activeTab = 'code'"
+          >
+            📄 代码视图 (日志与源码)
+          </button>
+          <button 
+            :class="['tab-btn', activeTab === 'topology' ? 'active' : '']" 
+            @click="activeTab = 'topology'"
+          >
+            🕸️ 架构调用依赖拓扑图谱
+          </button>
+        </div>
+
+        <!-- 3-A: 代码与日志视图 -->
+        <div v-show="activeTab === 'code'" class="tab-content flex-column" style="gap: 0.8rem; height: calc(100% - 44px);">
+          <!-- 3-1: 运行日志 -->
+          <div class="panel display-half">
+            <div class="panel-header">
+              <h3>🛠️ Agent 思考与工具调用日志</h3>
             </div>
-            <div
-              v-for="(log, idx) in agentLogs"
-              :key="idx"
-              :class="['log-item', log.type]"
-            >
-              <span class="log-time">[{{ new Date().toLocaleTimeString() }}]</span>
-              <pre class="log-message">{{ log.message }}</pre>
+            <div ref="logContainerRef" class="log-content">
+              <div v-if="agentLogs.length === 0" class="empty-logs">
+                等待 Agent 执行操作...
+              </div>
+              <div
+                v-for="(log, idx) in agentLogs"
+                :key="idx"
+                :class="['log-item', log.type]"
+              >
+                <span class="log-time">[{{ new Date().toLocaleTimeString() }}]</span>
+                <pre class="log-message">{{ log.message }}</pre>
+              </div>
+            </div>
+          </div>
+
+          <!-- 3-2: 最新高亮代码 -->
+          <div class="panel display-half">
+            <div class="panel-header">
+              <h3>📄 重构后最新完整代码</h3>
+            </div>
+            <div class="code-viewer-container">
+              <pre class="code-viewer"><code v-html="highlightedCode" class="hljs language-python"></code></pre>
             </div>
           </div>
         </div>
 
-        <!-- 3-2: 最新高亮代码 -->
-        <div class="panel display-half">
-          <div class="panel-header">
-            <h3>📄 重构后最新完整代码</h3>
-          </div>
-          <div class="code-viewer-container">
-            <pre class="code-viewer"><code v-html="highlightedCode" class="hljs language-python"></code></pre>
+        <!-- 3-B: 拓扑图谱视图 -->
+        <div v-show="activeTab === 'topology'" class="tab-content" style="height: calc(100% - 44px);">
+          <div class="panel" style="height: 100%;">
+            <TopologyGraph ref="topologyGraphRef" />
           </div>
         </div>
       </div>
@@ -387,6 +422,50 @@ const handleSendChatMessage = () => {
 .flex-column {
   display: flex;
   flex-direction: column;
+}
+
+/* Tab 样式 */
+.tab-header {
+  display: flex;
+  background-color: #2d2d2d;
+  border: 1px solid #3d3d3d;
+  border-radius: 8px;
+  overflow: hidden;
+  height: 36px;
+  flex-shrink: 0;
+}
+
+.tab-btn {
+  flex: 1;
+  background: transparent;
+  border: none;
+  color: #888;
+  font-size: 0.85rem;
+  font-weight: bold;
+  cursor: pointer;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+}
+
+.tab-btn:hover {
+  background-color: #333;
+  color: #ddd;
+}
+
+.tab-btn.active {
+  background-color: #3c3c3c;
+  color: #4fc08d;
+  border-bottom: 2px solid #4fc08d;
+}
+
+.tab-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 /* 控制栏专属 */
