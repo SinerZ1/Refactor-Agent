@@ -15,6 +15,40 @@ const threadId = ref('session_' + Math.random().toString(36).substring(2, 9))
 const userChatInput = ref('')
 const chatMessages = ref<{ role: 'user' | 'agent'; text: string }[]>([])
 
+// 阶段 1：多模型与服务提供商动态配置状态
+const modelConfig = ref({
+  provider: 'openai',
+  api_key: '',
+  base_url: 'https://api.siliconflow.cn/v1',
+  model_name: 'deepseek-ai/DeepSeek-V4-Flash',
+  vertex_project_id: 'project-c756c615-f8ff-41ea-8a3',
+  vertex_location: 'us-central1',
+  vertex_model_name: 'gemini-3.5-flash',
+  vertex_auth_mode: 'adc', // 'adc' | 'api_key'
+  vertex_adc_path: 'C:\\Users\\10900\\AppData\\Roaming\\gcloud\\application_default_credentials.json'
+})
+
+// 从 LocalStorage 加载本地模型配置
+const loadSavedConfig = () => {
+  const saved = localStorage.getItem('refactor_agent_model_config')
+  if (saved) {
+    try {
+      const parsed = JSON.parse(saved)
+      modelConfig.value = { ...modelConfig.value, ...parsed }
+    } catch (e) {
+      console.error('加载本地模型配置失败:', e)
+    }
+  }
+}
+
+// 保存配置到 LocalStorage
+const saveConfig = () => {
+  localStorage.setItem('refactor_agent_model_config', JSON.stringify(modelConfig.value))
+}
+
+// 页面加载时载入配置
+loadSavedConfig()
+
 // 阶段 6: 视图切换和拓扑组件引用
 const activeTab = ref<'code' | 'topology'>('code')
 const topologyGraphRef = ref<InstanceType<typeof TopologyGraph> | null>(null)
@@ -87,7 +121,8 @@ const sendStreamRequest = async (payloadText: string, isInitialTurn: boolean) =>
       },
       body: JSON.stringify({ 
         code: payloadText,
-        thread_id: threadId.value
+        thread_id: threadId.value,
+        model_config: modelConfig.value
       })
     })
 
@@ -208,6 +243,82 @@ const handleSendChatMessage = () => {
               <span v-if="isRefactoring" class="spinner"></span>
               {{ isRefactoring ? '分析重构中...' : '提交初始重构 👉' }}
             </button>
+          </div>
+        </div>
+
+        <!-- 阶段 1：智能体模型配置卡片 -->
+        <div class="panel settings-card">
+          <div class="panel-header">
+            <h3>⚙️ 智能体模型配置</h3>
+          </div>
+          <div class="panel-body flex-column" style="gap: 0.8rem; overflow-y: auto;">
+            <div class="form-group">
+              <label>服务提供商 (Provider):</label>
+              <select v-model="modelConfig.provider" @change="saveConfig" class="form-select">
+                <option value="openai">OpenAI 兼容 / 智谱 / 国产模型</option>
+                <option value="gemini_studio">Gemini AI Studio</option>
+                <option value="google_vertex">Google Vertex AI</option>
+              </select>
+            </div>
+
+            <!-- OpenAI 兼容配置 -->
+            <div v-if="modelConfig.provider === 'openai'" class="provider-sub-form">
+              <div class="form-group">
+                <label>API Key:</label>
+                <input v-model="modelConfig.api_key" @input="saveConfig" type="password" placeholder="请输入 API Key" class="form-input" />
+              </div>
+              <div class="form-group" style="margin-top: 0.4rem;">
+                <label>Base URL:</label>
+                <input v-model="modelConfig.base_url" @input="saveConfig" type="text" placeholder="https://api.openai.com/v1" class="form-input" />
+              </div>
+              <div class="form-group" style="margin-top: 0.4rem;">
+                <label>模型名称 (Model):</label>
+                <input v-model="modelConfig.model_name" @input="saveConfig" type="text" placeholder="gpt-4o-mini" class="form-input" />
+              </div>
+            </div>
+
+            <!-- Gemini AI Studio 配置 -->
+            <div v-if="modelConfig.provider === 'gemini_studio'" class="provider-sub-form">
+              <div class="form-group">
+                <label>Gemini API Key:</label>
+                <input v-model="modelConfig.api_key" @input="saveConfig" type="password" placeholder="请输入 Gemini API Key" class="form-input" />
+              </div>
+              <div class="form-group" style="margin-top: 0.4rem;">
+                <label>模型名称 (Model):</label>
+                <input v-model="modelConfig.model_name" @input="saveConfig" type="text" placeholder="gemini-1.5-flash" class="form-input" />
+              </div>
+            </div>
+
+            <!-- Google Vertex AI 配置 -->
+            <div v-if="modelConfig.provider === 'google_vertex'" class="provider-sub-form" style="display: flex; flex-direction: column; gap: 0.6rem;">
+              <div class="form-group">
+                <label>Project ID (项目ID):</label>
+                <input v-model="modelConfig.vertex_project_id" @input="saveConfig" type="text" placeholder="GCP 项目 ID" class="form-input" />
+              </div>
+              <div class="form-group">
+                <label>Location (可用区):</label>
+                <input v-model="modelConfig.vertex_location" @input="saveConfig" type="text" placeholder="us-central1" class="form-input" />
+              </div>
+              <div class="form-group">
+                <label>Vertex 模型名称:</label>
+                <input v-model="modelConfig.vertex_model_name" @input="saveConfig" type="text" placeholder="gemini-3.5-flash" class="form-input" />
+              </div>
+              <div class="form-group">
+                <label>验证方式 (Auth Mode):</label>
+                <select v-model="modelConfig.vertex_auth_mode" @change="saveConfig" class="form-select">
+                  <option value="adc">本地 ADC 凭证路径 (推荐)</option>
+                  <option value="api_key">Vertex API KEY 验证</option>
+                </select>
+              </div>
+              <div v-if="modelConfig.vertex_auth_mode === 'adc'" class="form-group">
+                <label>ADC JSON 凭据路径:</label>
+                <input v-model="modelConfig.vertex_adc_path" @input="saveConfig" type="text" placeholder="本地 JSON 凭据绝对路径" class="form-input" />
+              </div>
+              <div v-if="modelConfig.vertex_auth_mode === 'api_key'" class="form-group">
+                <label>Vertex API Key:</label>
+                <input v-model="modelConfig.api_key" @input="saveConfig" type="password" placeholder="请输入 API Key" class="form-input" />
+              </div>
+            </div>
           </div>
         </div>
 
@@ -745,5 +856,46 @@ const handleSendChatMessage = () => {
 @keyframes fadeIn {
   from { opacity: 0; transform: translateY(5px); }
   to { opacity: 1; transform: translateY(0); }
+}
+
+/* 阶段 1：智能体模型配置表单样式 */
+.settings-card {
+  max-height: 480px;
+}
+
+.form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  width: 100%;
+}
+
+.form-group label {
+  font-size: 0.8rem;
+  color: #888;
+  font-weight: bold;
+}
+
+.form-select, .form-input {
+  background-color: #1e1e1e;
+  border: 1px solid #3d3d3d;
+  border-radius: 4px;
+  color: #d4d4d4;
+  padding: 0.45rem 0.6rem;
+  font-size: 0.85rem;
+  outline: none;
+  box-sizing: border-box;
+  width: 100%;
+}
+
+.form-select:focus, .form-input:focus {
+  border-color: #4fc08d;
+  box-shadow: 0 0 3px rgba(79, 192, 141, 0.4);
+}
+
+.provider-sub-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
 }
 </style>

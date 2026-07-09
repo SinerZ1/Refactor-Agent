@@ -17,36 +17,88 @@ from .tools import architect_tools, developer_tools, reviewer_tools
 # 动态加载并实例化对应的 LLM 客户端，实现彻底的 Session 级模型路由隔离。这避免了全局单例 LLM 造成的并发/密钥冲突。
 # ============================================================
 
-def get_llm_from_config(config: dict):
+def get_llm_from_config(config: RunnableConfig):
     """
     根据传入的运行时配置（从前端获取）动态初始化对应的 LLM 客户端。
-    如果在编译图的配置中找不到，则退化至本地 .env 读取的环境变量。
+    支持三种 Provider:
+    - "openai"       : OpenAI 兼容接口 (如 GPT, 智谱, GLM 等)
+    - "gemini_studio": Gemini AI Studio (Google AI Studio)
+    - "google_vertex": Google Cloud Vertex AI (支持 ADC 凭证文件或 API Key 验证)
     """
     cfg = config.get("configurable", {}) if config else {}
     
     provider = cfg.get("provider", "openai")
-    api_key = cfg.get("api_key") or os.getenv("OPENAI_API_KEY", "")
-    base_url = cfg.get("base_url") or os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
     model_name = cfg.get("model_name") or os.getenv("MODEL_NAME", "gpt-4o-mini")
     temperature = cfg.get("temperature", 0.2)
     
-    use_vertex = cfg.get("use_vertex", os.getenv("GOOGLE_VERTEX_AI", "false").lower() == "true")
-    vertex_model = cfg.get("vertex_model_name", os.getenv("GOOGLE_VERTEX_MODEL_NAME", "gemini-2.5-flash"))
-    vertex_project = cfg.get("vertex_project_id", os.getenv("GOOGLE_VERTEX_PROJECT_ID", ""))
-    
-    if provider == "gemini" or use_vertex:
-        return ChatGoogleGenerativeAI(
-            model=vertex_model,
-            project=vertex_project,
-            temperature=temperature,
-        )
-    else:
+    if provider == "openai":
+        api_key = cfg.get("api_key") or os.getenv("OPENAI_API_KEY", "")
+        base_url = cfg.get("base_url") or os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
         return ChatOpenAI(
             api_key=api_key,
             base_url=base_url,
             model=model_name,
             temperature=temperature,
         )
+        
+    elif provider == "gemini_studio":
+        api_key = cfg.get("api_key") or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY", "")
+        return ChatGoogleGenerativeAI(
+            model=model_name,
+            google_api_key=api_key,
+            vertexai=False,
+            temperature=temperature,
+        )
+        
+    elif provider == "google_vertex":
+        project = cfg.get("vertex_project_id") or os.getenv("GOOGLE_VERTEX_PROJECT_ID", "")
+        location = cfg.get("vertex_location") or os.getenv("VERTEX_LOCATION", "us-central1")
+        model = cfg.get("vertex_model_name") or os.getenv("GOOGLE_VERTEX_MODEL_NAME", "gemini-2.5-flash")
+        auth_mode = cfg.get("vertex_auth_mode", "adc") # "adc" 或 "api_key"
+        
+        if auth_mode == "adc":
+            adc_path = cfg.get("vertex_adc_path") or os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")
+            if adc_path:
+                os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = adc_path
+            return ChatGoogleGenerativeAI(
+                model=model,
+                project=project,
+                location=location,
+                vertexai=True,
+                temperature=temperature,
+            )
+        else: # "api_key"
+            api_key = cfg.get("api_key") or os.getenv("VERTEX_API_KEY", "")
+            return ChatGoogleGenerativeAI(
+                model=model,
+                google_api_key=api_key,
+                project=project,
+                location=location,
+                vertexai=True,
+                temperature=temperature,
+            )
+            
+    else:
+        # 兼容旧版的 use_vertex 退化逻辑
+        use_vertex = os.getenv("GOOGLE_VERTEX_AI", "false").lower() == "true"
+        if use_vertex:
+            vertex_model = os.getenv("GOOGLE_VERTEX_MODEL_NAME", "gemini-2.5-flash")
+            vertex_project = os.getenv("GOOGLE_VERTEX_PROJECT_ID", "")
+            return ChatGoogleGenerativeAI(
+                model=vertex_model,
+                project=vertex_project,
+                vertexai=True,
+                temperature=temperature,
+            )
+        else:
+            api_key = os.getenv("OPENAI_API_KEY", "")
+            base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+            return ChatOpenAI(
+                api_key=api_key,
+                base_url=base_url,
+                model=model_name,
+                temperature=temperature,
+            )
 
 # 1. Architect 节点
 def call_architect(state: State, config: RunnableConfig):
