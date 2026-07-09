@@ -2,6 +2,8 @@
 import { ref, computed, nextTick, watch, onMounted } from 'vue'
 import hljs from 'highlight.js'
 import 'highlight.js/styles/vs2015.css' // 使用 VS2015 深色代码高亮主题
+import { VueFlow } from '@vue-flow/core'
+import type { Node, Edge } from '@vue-flow/core'
 import TopologyGraph from './components/TopologyGraph.vue'
 
 // 基础状态
@@ -136,8 +138,103 @@ onMounted(() => {
 })
 
 // 阶段 6: 视图切换和拓扑组件引用
-const activeTab = ref<'code' | 'topology'>('code')
+const activeTab = ref<'code' | 'dag' | 'topology'>('code')
 const topologyGraphRef = ref<InstanceType<typeof TopologyGraph> | null>(null)
+
+// 阶段 4：重构任务 DAG 面板 (Vue Flow 动态状态管理)
+const dagNodes = ref<Node[]>([
+  {
+    id: 'architect_task',
+    label: '📐 架构分析与重构规划',
+    position: { x: 30, y: 180 },
+    class: 'dag-node-pending',
+    data: { status: 'pending', title: 'Architect Task' }
+  },
+  {
+    id: 'models_py',
+    label: '📦 重构 models.py (数据模型)',
+    position: { x: 260, y: 50 },
+    class: 'dag-node-pending',
+    data: { status: 'pending', file: 'models.py' }
+  },
+  {
+    id: 'calculator_py',
+    label: '🧮 重构 Calculator.py (业务计算)',
+    position: { x: 260, y: 180 },
+    class: 'dag-node-pending',
+    data: { status: 'pending', file: 'Calculator.py' }
+  },
+  {
+    id: 'services_py',
+    label: '🛠️ 重构 services.py (系统服务)',
+    position: { x: 260, y: 310 },
+    class: 'dag-node-pending',
+    data: { status: 'pending', file: 'services.py' }
+  },
+  {
+    id: 'main_py',
+    label: '🚀 重构 main.py (入口编排)',
+    position: { x: 500, y: 180 },
+    class: 'dag-node-pending',
+    data: { status: 'pending', file: 'main.py' }
+  },
+  {
+    id: 'reviewer_task',
+    label: '🛡️ Reviewer 自动化单元测试',
+    position: { x: 740, y: 180 },
+    class: 'dag-node-pending',
+    data: { status: 'pending', title: 'Reviewer Task' }
+  }
+])
+
+const dagEdges = ref<Edge[]>([
+  { id: 'e1', source: 'architect_task', target: 'models_py', animated: false, style: { stroke: '#444' } },
+  { id: 'e2', source: 'architect_task', target: 'calculator_py', animated: false, style: { stroke: '#444' } },
+  { id: 'e3', source: 'architect_task', target: 'services_py', animated: false, style: { stroke: '#444' } },
+  { id: 'e4', source: 'models_py', target: 'main_py', animated: false, style: { stroke: '#444' } },
+  { id: 'e5', source: 'calculator_py', target: 'main_py', animated: false, style: { stroke: '#444' } },
+  { id: 'e6', source: 'services_py', target: 'main_py', animated: false, style: { stroke: '#444' } },
+  { id: 'e7', source: 'main_py', target: 'reviewer_task', animated: false, style: { stroke: '#444' } }
+])
+
+// 更新单个 DAG 任务节点状态，并同步控制边的流动特效
+const updateDagNodeStatus = (nodeId: string, status: 'pending' | 'in_progress' | 'completed' | 'failed') => {
+  const node = dagNodes.value.find(n => n.id === nodeId)
+  if (node) {
+    node.data.status = status
+    node.class = `dag-node-${status}`
+    
+    // 更新下游连线的动画流动和高亮色彩
+    if (status === 'completed') {
+      dagEdges.value.forEach(edge => {
+        if (edge.source === nodeId) {
+          edge.animated = true
+          edge.style = { stroke: '#4fc08d', strokeWidth: '3px' }
+        }
+      })
+    } else if (status === 'failed') {
+      dagEdges.value.forEach(edge => {
+        if (edge.source === nodeId) {
+          edge.animated = false
+          edge.style = { stroke: '#f44336', strokeWidth: '2px' }
+        }
+      })
+    }
+  }
+}
+
+// 开启重构流程时重置 DAG 看板状态
+const resetDag = () => {
+  dagNodes.value.forEach(node => {
+    node.data.status = 'pending'
+    node.class = 'dag-node-pending'
+  })
+  dagEdges.value.forEach(edge => {
+    edge.animated = false
+    edge.style = { stroke: '#444', strokeWidth: '1.5px' }
+  })
+  updateDagNodeStatus('architect_task', 'in_progress')
+}
 
 // 计算属性：利用 highlight.js 对生成的代码进行实时语法高亮
 const highlightedCode = computed(() => {
@@ -188,6 +285,7 @@ const sendStreamRequest = async (payloadText: string, isInitialTurn: boolean) =>
   if (isInitialTurn) {
     refactoredCode.value = ''
     chatMessages.value = []
+    resetDag()
   }
 
   // 为本次对话在 Chat 中占个位
@@ -243,9 +341,34 @@ const sendStreamRequest = async (payloadText: string, isInitialTurn: boolean) =>
               const token = parsed.token
               
               if (token.startsWith('[INFO]')) {
-                agentLogs.value.push({ type: 'info', message: token.replace('[INFO]', '').trim() })
+                const cleanMsg = token.replace('[INFO]', '').trim()
+                agentLogs.value.push({ type: 'info', message: cleanMsg })
+                
+                // 阶段 4：从日志中解析重构任务的当前状态并触发 DAG 状态变化
+                if (cleanMsg.includes('Architect')) {
+                  updateDagNodeStatus('architect_task', 'in_progress')
+                } else if (cleanMsg.includes('Developer')) {
+                  updateDagNodeStatus('architect_task', 'completed')
+                  if (cleanMsg.includes('models.py')) updateDagNodeStatus('models_py', 'in_progress')
+                  if (cleanMsg.includes('Calculator.py')) updateDagNodeStatus('calculator_py', 'in_progress')
+                  if (cleanMsg.includes('services.py')) updateDagNodeStatus('services_py', 'in_progress')
+                  if (cleanMsg.includes('main.py')) updateDagNodeStatus('main_py', 'in_progress')
+                } else if (cleanMsg.includes('Reviewer')) {
+                  updateDagNodeStatus('reviewer_task', 'in_progress')
+                }
               } else if (token.startsWith('[SUCCESS]')) {
-                agentLogs.value.push({ type: 'success', message: token.replace('[SUCCESS]', '').trim() })
+                const cleanMsg = token.replace('[SUCCESS]', '').trim()
+                agentLogs.value.push({ type: 'success', message: cleanMsg })
+                
+                // 阶段 4：工具执行成功，代表对应文件重构完成，点亮绿灯
+                if (cleanMsg.includes('write_code_file')) {
+                  if (cleanMsg.includes('models.py')) updateDagNodeStatus('models_py', 'completed')
+                  if (cleanMsg.includes('Calculator.py')) updateDagNodeStatus('calculator_py', 'completed')
+                  if (cleanMsg.includes('services.py')) updateDagNodeStatus('services_py', 'completed')
+                  if (cleanMsg.includes('main.py')) updateDagNodeStatus('main_py', 'completed')
+                } else if (cleanMsg.includes('run_unit_tests')) {
+                  updateDagNodeStatus('reviewer_task', 'completed')
+                }
               } else if (token.startsWith('[ERROR]')) {
                 agentLogs.value.push({ type: 'error', message: token.replace('[ERROR]', '').trim() })
               } else {
@@ -254,6 +377,17 @@ const sendStreamRequest = async (payloadText: string, isInitialTurn: boolean) =>
                 refactoredCode.value = accumulatedResponse
                 if (chatMessages.value[agentMessageIndex]) {
                   chatMessages.value[agentMessageIndex].text = accumulatedResponse
+                }
+                
+                // 阶段 4：解析内容中是否触发了最终的成功或失败判定
+                if (accumulatedResponse.includes('【REFACTOR_SUCCESS】')) {
+                  updateDagNodeStatus('models_py', 'completed')
+                  updateDagNodeStatus('calculator_py', 'completed')
+                  updateDagNodeStatus('services_py', 'completed')
+                  updateDagNodeStatus('main_py', 'completed')
+                  updateDagNodeStatus('reviewer_task', 'completed')
+                } else if (accumulatedResponse.includes('【REFACTOR_FAIL】')) {
+                  updateDagNodeStatus('reviewer_task', 'failed')
                 }
               }
             }
@@ -486,6 +620,12 @@ const handleSendChatMessage = () => {
             📄 代码视图 (日志与源码)
           </button>
           <button 
+            :class="['tab-btn', activeTab === 'dag' ? 'active' : '']" 
+            @click="activeTab = 'dag'"
+          >
+            📋 重构任务 DAG 看板
+          </button>
+          <button 
             :class="['tab-btn', activeTab === 'topology' ? 'active' : '']" 
             @click="activeTab = 'topology'"
           >
@@ -522,6 +662,27 @@ const handleSendChatMessage = () => {
             </div>
             <div class="code-viewer-container">
               <pre class="code-viewer"><code v-html="highlightedCode" class="hljs language-python"></code></pre>
+            </div>
+          </div>
+        </div>
+
+        <!-- 3-B: 重构任务 DAG 看板视图 (Vue Flow) -->
+        <div v-show="activeTab === 'dag'" class="tab-content" style="height: calc(100% - 44px);">
+          <div class="panel" style="height: 100%;">
+            <div class="topology-toolbar">
+              <span class="title">📋 重构任务 DAG 进度看板</span>
+              <span class="badge-neo4j" style="background-color: #0b533e;">任务编排</span>
+            </div>
+            <div style="flex: 1; width: 100%; height: 100%; min-height: 350px;">
+              <VueFlow
+                v-model:nodes="dagNodes"
+                v-model:edges="dagEdges"
+                :fit-view-on-init="true"
+                :nodes-draggable="true"
+                :zoom-on-scroll="true"
+                :zoom-on-pinch="true"
+                :zoom-on-double-click="false"
+              />
             </div>
           </div>
         </div>
@@ -1210,5 +1371,64 @@ const handleSendChatMessage = () => {
 }
 .chat-bubble.architect .avatar {
   color: #00e5ff !important;
+}
+
+/* 阶段 4：Vue Flow DAG 样式与动效 */
+@import '@vue-flow/core/dist/style.css';
+@import '@vue-flow/core/dist/theme-default.css';
+
+.vue-flow {
+  background-color: #1a1a1a !important;
+}
+
+.vue-flow__node {
+  border-radius: 8px !important;
+  font-size: 11.5px !important;
+  font-weight: bold !important;
+  padding: 10px !important;
+  text-align: center !important;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.4) !important;
+  width: 185px !important;
+  transition: all 0.3s ease !important;
+}
+
+.dag-node-pending {
+  background-color: #2a2a2a !important;
+  color: #777 !important;
+  border: 2px solid #3d3d3d !important;
+}
+
+.dag-node-in_progress {
+  background-color: #3e2723 !important;
+  color: #ffb74d !important;
+  border: 2px solid #ff9800 !important;
+  animation: breathing 1.5s infinite ease-in-out !important;
+}
+
+.dag-node-completed {
+  background-color: #1b5e20 !important;
+  color: #81c784 !important;
+  border: 2px solid #4fc08d !important;
+}
+
+.dag-node-failed {
+  background-color: #b71c1c !important;
+  color: #e57373 !important;
+  border: 2px solid #f44336 !important;
+  animation: shaking 0.4s ease-in-out !important;
+}
+
+@keyframes breathing {
+  0% { box-shadow: 0 0 4px #ff9800; }
+  50% { box-shadow: 0 0 16px #ff9800; }
+  100% { box-shadow: 0 0 4px #ff9800; }
+}
+
+@keyframes shaking {
+  0% { transform: translateX(0); }
+  25% { transform: translateX(-5px); }
+  50% { transform: translateX(5px); }
+  75% { transform: translateX(-5px); }
+  100% { transform: translateX(0); }
 }
 </style>
