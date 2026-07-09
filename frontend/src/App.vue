@@ -13,7 +13,7 @@ const agentLogs = ref<{ type: 'info' | 'success' | 'error'; message: string }[]>
 // 阶段 4：会话与多轮对话记忆状态
 const threadId = ref('session_' + Math.random().toString(36).substring(2, 9))
 const userChatInput = ref('')
-const chatMessages = ref<{ role: 'user' | 'agent'; text: string }[]>([])
+const chatMessages = ref<{ role: 'user' | 'agent' | 'coder' | 'reviewer' | 'architect'; text: string }[]>([])
 
 // 阶段 1：多模型与服务提供商动态配置状态
 const modelConfig = ref({
@@ -82,6 +82,18 @@ const initWebSocket = () => {
         // 审批结果确认，隐藏弹窗，发起新的 SSE 重构流请求进行恢复
         isApprovalModalOpen.value = false
         sendStreamRequest('', false)
+      } else if (data.type === 'chatroom_message') {
+        // 阶段 3：A2A 多角色群聊，分发消息角色与头像
+        const sender = data.sender
+        const content = data.content
+        let role: 'coder' | 'reviewer' | 'architect' = 'coder'
+        if (sender === 'ReviewerAgent') role = 'reviewer'
+        else if (sender === 'ArchitectAgent') role = 'architect'
+        
+        chatMessages.value.push({
+          role: role,
+          text: content
+        })
       }
     } catch (err) {
       console.error('[WebSocket] Failed to parse message:', err)
@@ -431,7 +443,14 @@ const handleSendChatMessage = () => {
               :key="index"
               :class="['chat-bubble', msg.role]"
             >
-              <div class="avatar">{{ msg.role === 'user' ? '👤 用户' : '🤖 Agent' }}</div>
+              <div class="avatar">
+                <span v-if="msg.role === 'user'">👤 用户</span>
+                <span v-else-if="msg.role === 'agent'">🤖 Agent</span>
+                <span v-else-if="msg.role === 'coder'">🧑‍💻 CoderAgent (Developer)</span>
+                <span v-else-if="msg.role === 'reviewer'">🛡️ ReviewerAgent (Reviewer)</span>
+                <span v-else-if="msg.role === 'architect'">📐 ArchitectAgent (Architect)</span>
+                <span v-else>🤖 {{ msg.role }}</span>
+              </div>
               <pre class="bubble-text">{{ msg.text }}</pre>
             </div>
           </div>
@@ -1162,5 +1181,34 @@ const handleSendChatMessage = () => {
 @keyframes scaleIn {
   from { transform: scale(0.95); opacity: 0; }
   to { transform: scale(1); opacity: 1; }
+}
+
+/* 阶段 3: A2A 多角色群聊气泡样式 */
+.chat-bubble.coder {
+  align-self: flex-start;
+  background-color: #2b2a1a;
+  color: #ffd700;
+  border: 1px solid #d4af37;
+}
+.chat-bubble.reviewer {
+  align-self: flex-start;
+  background-color: #261622;
+  color: #e040fb;
+  border: 1px solid #ba68c8;
+}
+.chat-bubble.architect {
+  align-self: flex-start;
+  background-color: #16242d;
+  color: #00e5ff;
+  border: 1px solid #4dd0e1;
+}
+.chat-bubble.coder .avatar {
+  color: #ffd700 !important;
+}
+.chat-bubble.reviewer .avatar {
+  color: #e040fb !important;
+}
+.chat-bubble.architect .avatar {
+  color: #00e5ff !important;
 }
 </style>

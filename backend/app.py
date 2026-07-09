@@ -62,6 +62,17 @@ async def websocket_endpoint(websocket: WebSocket, thread_id: str):
         manager.disconnect(thread_id)
 
 
+async def send_chatroom_message(thread_id: str, sender: str, content: str):
+    """
+    阶段 3: A2A 多角色聊天室，将智能体的中间发言向 WebSocket 广播
+    """
+    await manager.send_personal_message({
+        "type": "chatroom_message",
+        "sender": sender,
+        "content": content
+    }, thread_id)
+
+
 @app.on_event("startup")
 def startup_event():
     # 启动时自动静态扫描 CodeSmells 目录，构建 AST 符号索引
@@ -117,7 +128,12 @@ def refactor_code(request: RefactorRequest):
     """
     接收代码，调用 Agent 进行简单重构
     """
-    config = {"configurable": {"thread_id": request.thread_id}}
+    config = {
+        "configurable": {
+            "thread_id": request.thread_id,
+            "ws_callback": send_chatroom_message
+        }
+    }
     if request.custom_model_config:
         config["configurable"].update(request.custom_model_config)
     refactored_result = simple_refactor(request.code, config)
@@ -132,7 +148,12 @@ def refactor_code_stream(request: RefactorRequest):
     """
     流式接收重构代码，返回 SSE (Server-Sent Events) 流
     """
-    config = {"configurable": {"thread_id": request.thread_id}}
+    config = {
+        "configurable": {
+            "thread_id": request.thread_id,
+            "ws_callback": send_chatroom_message
+        }
+    }
     if request.custom_model_config:
         config["configurable"].update(request.custom_model_config)
 
