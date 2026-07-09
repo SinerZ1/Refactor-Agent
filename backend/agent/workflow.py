@@ -1,13 +1,15 @@
 import os
-from langgraph.graph import StateGraph, START, END
-from langgraph.prebuilt import ToolNode
+
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import END, START, StateGraph
+from langgraph.prebuilt import ToolNode
+
+from .edges import route_architect, route_developer, route_reviewer
+from .nodes import call_architect, call_developer, call_reviewer, developer_retry_node
 
 # 使用高内聚相对导入，解耦子包结构
 from .state import State
 from .tools import architect_tools, developer_tools, reviewer_tools
-from .nodes import call_architect, call_developer, call_reviewer, developer_retry_node
-from .edges import route_architect, route_developer, route_reviewer
 
 # ============================================================
 # 教学说明: 状态图装配层 (StateGraph Assembly) 与持久化 Checkpointer
@@ -38,28 +40,34 @@ workflow.add_node("reviewer_tools", ToolNode(reviewer_tools))
 workflow.add_edge(START, "architect")
 
 # Architect 条件边路由
-workflow.add_conditional_edges("architect", route_architect, {
-    "architect_tools": "architect_tools",
-    "developer": "developer"
-})
+workflow.add_conditional_edges(
+    "architect",
+    route_architect,
+    {"architect_tools": "architect_tools", "developer": "developer"},
+)
 workflow.add_edge("architect_tools", "architect")
 
 # Developer 条件边路由
-workflow.add_conditional_edges("developer", route_developer, {
-    "developer_tools": "developer_tools",
-    "reviewer": "reviewer"
-})
+workflow.add_conditional_edges(
+    "developer",
+    route_developer,
+    {"developer_tools": "developer_tools", "reviewer": "reviewer"},
+)
 workflow.add_edge("developer_tools", "developer")
 
 # Developer Retry 直连返回开发节点
 workflow.add_edge("developer_retry", "developer")
 
 # Reviewer 条件边路由
-workflow.add_conditional_edges("reviewer", route_reviewer, {
-    "reviewer_tools": "reviewer_tools",
-    "developer_retry": "developer_retry",
-    END: END
-})
+workflow.add_conditional_edges(
+    "reviewer",
+    route_reviewer,
+    {
+        "reviewer_tools": "reviewer_tools",
+        "developer_retry": "developer_retry",
+        END: END,
+    },
+)
 workflow.add_edge("reviewer_tools", "reviewer")
 
 
@@ -72,12 +80,16 @@ def get_checkpointer():
     if redis_url:
         try:
             from langgraph.checkpoint.redis import RedisSaver
+
             saver = RedisSaver.from_conn_string(redis_url)
             print("[Checkpointer] 成功加载 RedisSaver 持久化记忆。")
             return saver
         except Exception as e:
-            print(f"[Checkpointer] 初始化 RedisSaver 失败: {e}。将降级使用 MemorySaver。")
+            print(
+                f"[Checkpointer] 初始化 RedisSaver 失败: {e}。将降级使用 MemorySaver。"
+            )
     return MemorySaver()
+
 
 # 编译并导出状态图应用
 app_graph = workflow.compile(checkpointer=get_checkpointer())

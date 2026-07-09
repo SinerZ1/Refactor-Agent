@@ -1,7 +1,8 @@
-import os
 import ast
-from neo4j import GraphDatabase
+import os
+
 from dotenv import load_dotenv
+from neo4j import GraphDatabase
 
 load_dotenv()
 
@@ -9,6 +10,7 @@ load_dotenv()
 NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
 NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
 NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "password")
+
 
 def get_neo4j_driver():
     try:
@@ -19,6 +21,7 @@ def get_neo4j_driver():
     except Exception as e:
         print(f"[Neo4j] 连接失败: {e}. 请确保 Neo4j 正在运行并且配置正确。")
         return None
+
 
 def parse_code_to_graph(directory_path: str = "CodeSmells"):
     """
@@ -57,15 +60,19 @@ def parse_code_to_graph(directory_path: str = "CodeSmells"):
                             end_line = getattr(node, "end_lineno", len(lines))
                             symbol_name = node.name
                             symbol_code = "\n".join(lines[start_line - 1 : end_line])
-                            stype = "Class" if isinstance(node, ast.ClassDef) else "Function"
-                            
+                            stype = (
+                                "Class"
+                                if isinstance(node, ast.ClassDef)
+                                else "Function"
+                            )
+
                             # 收集符号
                             symbol_info = {
                                 "name": symbol_name,
                                 "type": stype,
                                 "file_path": file_path.replace("\\", "/"),
                                 "code": symbol_code,
-                                "node_ref": node # 保存 ast 节点以在下一步寻找调用
+                                "node_ref": node,  # 保存 ast 节点以在下一步寻找调用
                             }
                             symbols.append(symbol_info)
                             symbol_dict[symbol_name] = symbol_info
@@ -93,6 +100,7 @@ def parse_code_to_graph(directory_path: str = "CodeSmells"):
     calls = list(set(calls))
     return symbols, calls
 
+
 def index_to_neo4j(directory_path: str = "CodeSmells"):
     """
     静态解析代码，然后将类、函数和调用关系存入 Neo4j
@@ -103,12 +111,12 @@ def index_to_neo4j(directory_path: str = "CodeSmells"):
         return False
 
     symbols, calls = parse_code_to_graph(directory_path)
-    
+
     try:
         with driver.session() as session:
             # 1. 清空旧数据（仅清理代码相关的图）
             session.run("MATCH (n:Symbol) DETACH DELETE n")
-            
+
             # 2. 写入节点
             for sym in symbols:
                 session.run(
@@ -121,9 +129,9 @@ def index_to_neo4j(directory_path: str = "CodeSmells"):
                     name=sym["name"],
                     type=sym["type"],
                     file_path=sym["file_path"],
-                    code=sym["code"]
+                    code=sym["code"],
                 )
-            
+
             # 3. 写入调用边
             for caller, callee in calls:
                 session.run(
@@ -133,7 +141,7 @@ def index_to_neo4j(directory_path: str = "CodeSmells"):
                     MERGE (a)-[:CALLS]->(b)
                     """,
                     caller=caller,
-                    callee=callee
+                    callee=callee,
                 )
         print(f"[Neo4j] 成功写入 {len(symbols)} 个符号，{len(calls)} 条调用关系。")
         return True
@@ -143,6 +151,7 @@ def index_to_neo4j(directory_path: str = "CodeSmells"):
     finally:
         driver.close()
 
+
 def get_topology_data():
     """
     提供给前端的可视化接口：查询 Neo4j 拓扑结构，返回节点和边。
@@ -151,7 +160,10 @@ def get_topology_data():
     if not driver:
         # 降级返回空，或者基于 AST 静态结果构建内存图
         symbols, calls = parse_code_to_graph()
-        nodes = [{"name": s["name"], "type": s["type"], "file_path": s["file_path"]} for s in symbols]
+        nodes = [
+            {"name": s["name"], "type": s["type"], "file_path": s["file_path"]}
+            for s in symbols
+        ]
         links = [{"source": c[0], "target": c[1]} for c in calls]
         return {"nodes": nodes, "links": links, "fallback": True}
 
@@ -162,30 +174,35 @@ def get_topology_data():
             result = session.run("MATCH (n:Symbol) RETURN n")
             for record in result:
                 node = record["n"]
-                nodes.append({
-                    "name": node.get("name"),
-                    "type": node.get("type"),
-                    "file_path": node.get("file_path"),
-                    "code": node.get("code")
-                })
-            
-            result = session.run("MATCH (a:Symbol)-[r:CALLS]->(b:Symbol) RETURN a.name AS source, b.name AS target")
+                nodes.append(
+                    {
+                        "name": node.get("name"),
+                        "type": node.get("type"),
+                        "file_path": node.get("file_path"),
+                        "code": node.get("code"),
+                    }
+                )
+
+            result = session.run(
+                "MATCH (a:Symbol)-[r:CALLS]->(b:Symbol) RETURN a.name AS source, b.name AS target"
+            )
             for record in result:
-                links.append({
-                    "source": record["source"],
-                    "target": record["target"]
-                })
+                links.append({"source": record["source"], "target": record["target"]})
     except Exception as e:
         print(f"[Neo4j] 获取拓扑图谱失败: {e}")
         # 异常情况下也采用 AST 降级
         symbols, calls = parse_code_to_graph()
-        nodes = [{"name": s["name"], "type": s["type"], "file_path": s["file_path"]} for s in symbols]
+        nodes = [
+            {"name": s["name"], "type": s["type"], "file_path": s["file_path"]}
+            for s in symbols
+        ]
         links = [{"source": c[0], "target": c[1]} for c in calls]
         return {"nodes": nodes, "links": links, "fallback": True}
     finally:
         driver.close()
-        
+
     return {"nodes": nodes, "links": links, "fallback": False}
+
 
 if __name__ == "__main__":
     index_to_neo4j()

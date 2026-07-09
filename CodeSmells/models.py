@@ -1,12 +1,13 @@
 # models.py - 包含糟糕的数据模型和缺少类型的类定义
 
+
 class DB:
     def __init__(self):
         self.conn = "poor_mock_connection"
         self.data = {
             "users": [
                 {"id": 1, "name": "alice", "role": "admin"},
-                {"id": 2, "name": "bob", "role": "user"}
+                {"id": 2, "name": "bob", "role": "user"},
             ]
         }
 
@@ -14,6 +15,7 @@ class DB:
         # 糟糕的方法命名与硬编码
         print("Querying table: " + tbl)
         return self.data.get(tbl, [])
+
 
 class UserRecord:
     def __init__(self, raw_data):

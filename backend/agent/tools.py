@@ -1,14 +1,16 @@
 import os
 import subprocess
+
 from langchain_core.tools import tool
 
 # ============================================================
 # 教学说明: 智能体工具库 (Agent Tooling)
 # ------------------------------------------------------------
 # 这里的工具在底层相当于 Hello-Agents 课程里讲过的 Tool 定义。
-# 通过 @tool 装饰器，LangChain 能够自动根据函数签名和 Docstring 
+# 通过 @tool 装饰器，LangChain 能够自动根据函数签名和 Docstring
 # 提取出 JSON Schema，并在 LLM 调用时序列化并传输，实现自动函数调用。
 # ============================================================
+
 
 @tool
 def read_code_file(file_path: str) -> str:
@@ -20,6 +22,7 @@ def read_code_file(file_path: str) -> str:
             return f.read()
     except Exception as e:
         return f"读取文件失败: {str(e)}"
+
 
 @tool
 def write_code_file(file_path: str, content: str) -> str:
@@ -36,6 +39,7 @@ def write_code_file(file_path: str, content: str) -> str:
     except Exception as e:
         return f"写入文件失败: {str(e)}"
 
+
 @tool
 def run_unit_tests(test_command: str = "pytest") -> str:
     """
@@ -50,12 +54,13 @@ def run_unit_tests(test_command: str = "pytest") -> str:
             text=True,
             encoding=encoding_format,
             errors="replace",
-            timeout=20
+            timeout=20,
         )
         output = (result.stdout or "") + "\n" + (result.stderr or "")
         return f"测试执行完成。退出代码 (Exit Code): {result.returncode}\n输出内容:\n{output}"
     except Exception as e:
         return f"运行测试失败: {str(e)}"
+
 
 @tool
 def search_symbol_definition(symbol_name: str) -> str:
@@ -64,7 +69,9 @@ def search_symbol_definition(symbol_name: str) -> str:
     """
     # 动态导入避免循环依赖
     from code_indexer import get_symbol_definition_content
+
     return get_symbol_definition_content(symbol_name)
+
 
 @tool
 def query_neo4j_topology() -> str:
@@ -74,13 +81,16 @@ def query_neo4j_topology() -> str:
     """
     # 动态导入避免循环依赖
     from graph_indexer import get_topology_data
+
     try:
         data = get_topology_data()
         fallback_str = " (AST 降级内存图模式)" if data.get("fallback") else ""
         result_str = f"=== 项目代码调用图谱{fallback_str} ===\n"
         result_str += "【节点 (Symbols)】:\n"
         for node in data["nodes"]:
-            result_str += f"- [{node['type']}] {node['name']} (定义于 {node['file_path']})\n"
+            result_str += (
+                f"- [{node['type']}] {node['name']} (定义于 {node['file_path']})\n"
+            )
         result_str += "\n【调用关系 (CALLS Relationships)】:\n"
         for link in data["links"]:
             result_str += f"- {link['source']} -> {link['target']}\n"
@@ -88,6 +98,7 @@ def query_neo4j_topology() -> str:
         return result_str
     except Exception as e:
         return f"查询 Neo4j 拓扑图谱失败: {str(e)}"
+
 
 # 区分不同智能体的工具集合
 architect_tools = [read_code_file, search_symbol_definition, query_neo4j_topology]

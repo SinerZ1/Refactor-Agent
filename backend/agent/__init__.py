@@ -1,9 +1,12 @@
 import json
+
 from langchain_core.messages import HumanMessage
+
 from .workflow import app_graph
 
 # 显式导出
 __all__ = ["app_graph", "simple_refactor", "stream_refactor"]
+
 
 def simple_refactor(code: str, config: dict = None) -> str:
     """
@@ -12,10 +15,13 @@ def simple_refactor(code: str, config: dict = None) -> str:
     run_config = config or {"configurable": {"thread_id": "default_sync_session"}}
     input_msg = HumanMessage(content=f"请帮我处理以下代码或路径：\n\n{code}")
     try:
-        final_state = app_graph.invoke({"messages": [input_msg], "retry_count": 0}, run_config)
+        final_state = app_graph.invoke(
+            {"messages": [input_msg], "retry_count": 0}, run_config
+        )
         return final_state["messages"][-1].content
     except Exception as e:
         return f"# [运行失败]\n# 错误信息: {str(e)}"
+
 
 def stream_refactor(code: str, thread_id: str = "default_session", config: dict = None):
     """
@@ -34,9 +40,17 @@ def stream_refactor(code: str, thread_id: str = "default_session", config: dict 
 
     try:
         # 传入 retry_count 初始化
-        for chunk in app_graph.stream({"messages": [input_msg], "retry_count": 0}, run_config, stream_mode="updates"):
+        for chunk in app_graph.stream(
+            {"messages": [input_msg], "retry_count": 0},
+            run_config,
+            stream_mode="updates",
+        ):
             for node_name, node_output in chunk.items():
-                if node_name in ["architect_tools", "developer_tools", "reviewer_tools"]:
+                if node_name in [
+                    "architect_tools",
+                    "developer_tools",
+                    "reviewer_tools",
+                ]:
                     # 工具执行节点完毕，向前端推送运行日志
                     for msg in node_output.get("messages", []):
                         yield f"[SUCCESS] 工具 `{msg.name}` 运行结果:\n{msg.content}\n"
@@ -52,7 +66,7 @@ def stream_refactor(code: str, thread_id: str = "default_session", config: dict 
                             text_content = prefix + msg.content + "\n"
                             chunk_size = 12
                             for i in range(0, len(text_content), chunk_size):
-                                yield text_content[i:i+chunk_size]
+                                yield text_content[i : i + chunk_size]
                 elif node_name == "developer_retry":
                     yield "\n[SYSTEM] 检测到审查未通过，已启动开发者重试节点...\n"
     except Exception as e:
