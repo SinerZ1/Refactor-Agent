@@ -33,15 +33,27 @@ def stream_refactor(code: str, thread_id: str = "default_session", config: dict 
         run_config["configurable"].update(config["configurable"])
 
     current_state = app_graph.get_state(run_config)
-    if not current_state.values or not current_state.values.get("messages"):
-        input_msg = HumanMessage(content=f"请帮我处理以下代码或路径：\n\n{code}")
+    
+    # 阶段 2：检测是否处于挂起（Interrupt）状态，并根据是否有 resume_value 执行恢复运行
+    if current_state.interrupts:
+        resume_value = run_config["configurable"].get("resume_value")
+        if resume_value is not None:
+            from langgraph.types import Command
+            stream_input = Command(resume=resume_value)
+        else:
+            # 如果处于挂起状态但未传 approval 状态，则终止流，防止重复触发
+            yield "[INFO] 状态机已挂起，正在等待用户的人机协作审批放行信号...\n"
+            return
     else:
-        input_msg = HumanMessage(content=code)
+        if not current_state.values or not current_state.values.get("messages"):
+            stream_input = {"messages": [HumanMessage(content=f"请帮我处理以下代码或路径：\n\n{code}")], "retry_count": 0}
+        else:
+            stream_input = {"messages": [HumanMessage(content=code)]}
 
     try:
-        # 传入 retry_count 初始化
+        # 传入初始消息字典、多轮追问消息或恢复 Command 进行流式迭代
         for chunk in app_graph.stream(
-            {"messages": [input_msg], "retry_count": 0},
+            stream_input,
             run_config,
             stream_mode="updates",
         ):

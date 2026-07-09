@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, nextTick, watch } from 'vue'
+import { ref, computed, nextTick, watch, onMounted } from 'vue'
 import hljs from 'highlight.js'
 import 'highlight.js/styles/vs2015.css' // 使用 VS2015 深色代码高亮主题
 import TopologyGraph from './components/TopologyGraph.vue'
@@ -49,6 +49,80 @@ const saveConfig = () => {
 // 页面加载时载入配置
 loadSavedConfig()
 
+// 阶段 2：WebSocket 双向全双工 & 人机协作审批 (HITL)
+const socket = ref<WebSocket | null>(null)
+const isApprovalModalOpen = ref(false)
+const approvalPayload = ref<{
+  file_path: string
+  original_code: string
+  refactored_code: string
+} | null>(null)
+
+// 初始化 WebSocket 连接并监听
+const initWebSocket = () => {
+  if (socket.value) {
+    socket.value.close()
+  }
+
+  const wsUrl = `ws://127.0.0.1:8000/ws/refactor/${threadId.value}`
+  console.log(`[WebSocket] Connecting to ${wsUrl}`)
+  
+  socket.value = new WebSocket(wsUrl)
+
+  socket.value.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data)
+      console.log('[WebSocket] Received message:', data)
+
+      if (data.type === 'approval_request') {
+        // 挂起状态，显示 HITL 审批弹窗
+        approvalPayload.value = data.payload
+        isApprovalModalOpen.value = true
+      } else if (data.type === 'approval_confirmed') {
+        // 审批结果确认，隐藏弹窗，发起新的 SSE 重构流请求进行恢复
+        isApprovalModalOpen.value = false
+        sendStreamRequest('', false)
+      }
+    } catch (err) {
+      console.error('[WebSocket] Failed to parse message:', err)
+    }
+  }
+
+  socket.value.onclose = () => {
+    console.log('[WebSocket] Disconnected.')
+  }
+
+  socket.value.onerror = (err) => {
+    console.error('[WebSocket] Error:', err)
+  }
+}
+
+// 批准写入修改
+const handleApprove = () => {
+  if (socket.value && socket.value.readyState === WebSocket.OPEN) {
+    socket.value.send(JSON.stringify({
+      type: 'approval_response',
+      approved: true
+    }))
+  }
+}
+
+// 拒绝写入修改并打回
+const handleReject = () => {
+  if (socket.value && socket.value.readyState === WebSocket.OPEN) {
+    socket.value.send(JSON.stringify({
+      type: 'approval_response',
+      approved: false
+    }))
+    isApprovalModalOpen.value = false
+  }
+}
+
+// 挂载时启动
+onMounted(() => {
+  initWebSocket()
+})
+
 // 阶段 6: 视图切换和拓扑组件引用
 const activeTab = ref<'code' | 'topology'>('code')
 const topologyGraphRef = ref<InstanceType<typeof TopologyGraph> | null>(null)
@@ -93,6 +167,7 @@ const handleNewSession = () => {
   userChatInput.value = ''
   chatMessages.value = []
   agentLogs.value = []
+  initWebSocket()
 }
 
 // 核心流式请求方法
@@ -440,6 +515,41 @@ const handleSendChatMessage = () => {
         </div>
       </div>
     </main>
+
+    <!-- 阶段 2：人机协作审批 (HITL) 弹窗 -->
+    <div v-if="isApprovalModalOpen && approvalPayload" class="modal-overlay">
+      <div class="modal-container">
+        <div class="modal-header">
+          <h3>🛡️ 人机协作审批 (HITL) —— 代码修改确认</h3>
+          <span class="file-badge">{{ approvalPayload.file_path }}</span>
+        </div>
+        
+        <div class="modal-body">
+          <p class="modal-tip">
+            Developer Agent 申请写入文件。为了系统的安全和质量，请审查以下原代码与重构代码的对比。
+          </p>
+          
+          <div class="diff-container">
+            <!-- 左栏：原代码 -->
+            <div class="diff-panel original">
+              <div class="diff-panel-title">原代码 (Original)</div>
+              <pre class="diff-pre"><code>{{ approvalPayload.original_code || '# 这是一个新建的文件，原代码为空。' }}</code></pre>
+            </div>
+            
+            <!-- 右栏：重构代码 -->
+            <div class="diff-panel modified">
+              <div class="diff-panel-title">重构代码 (Refactored)</div>
+              <pre class="diff-pre"><code>{{ approvalPayload.refactored_code }}</code></pre>
+            </div>
+          </div>
+        </div>
+        
+        <div class="modal-footer">
+          <button @click="handleReject" class="modal-btn btn-reject">❌ 拒绝并退回</button>
+          <button @click="handleApprove" class="modal-btn btn-approve">🟢 批准写入放行</button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -897,5 +1007,160 @@ const handleSendChatMessage = () => {
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
+}
+
+/* 阶段 2：HITL 审批弹窗样式 */
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  background-color: rgba(0, 0, 0, 0.75);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  z-index: 9999;
+}
+
+.modal-container {
+  width: 85%;
+  height: 80%;
+  background-color: #252526;
+  border: 1px solid #4fc08d;
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+  animation: scaleIn 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.modal-header {
+  padding: 1rem 1.5rem;
+  background-color: #333;
+  border-bottom: 1px solid #3d3d3d;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.modal-header h3 {
+  margin: 0;
+  font-size: 1.1rem;
+  color: #4fc08d;
+}
+
+.file-badge {
+  background-color: #1a1a1a;
+  border: 1px solid #555;
+  color: #ffaa00;
+  font-family: monospace;
+  font-size: 0.85rem;
+  padding: 0.2rem 0.6rem;
+  border-radius: 4px;
+}
+
+.modal-body {
+  flex: 1;
+  padding: 1.2rem 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  overflow: hidden;
+}
+
+.modal-tip {
+  margin: 0;
+  font-size: 0.9rem;
+  color: #aaa;
+}
+
+.diff-container {
+  flex: 1;
+  display: flex;
+  gap: 1rem;
+  overflow: hidden;
+}
+
+.diff-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid #3d3d3d;
+}
+
+.diff-panel.original {
+  background-color: #1f1414;
+}
+
+.diff-panel.modified {
+  background-color: #121f18;
+}
+
+.diff-panel-title {
+  padding: 0.4rem 0.8rem;
+  font-size: 0.8rem;
+  font-weight: bold;
+}
+
+.diff-panel.original .diff-panel-title {
+  background-color: #3d1b1b;
+  color: #f44336;
+}
+
+.diff-panel.modified .diff-panel-title {
+  background-color: #1c3d23;
+  color: #4fc08d;
+}
+
+.diff-pre {
+  margin: 0;
+  padding: 0.8rem;
+  flex: 1;
+  overflow: auto;
+  font-family: 'Fira Code', 'Courier New', monospace;
+  font-size: 12px;
+  line-height: 1.4;
+  color: #ddd;
+}
+
+.modal-footer {
+  padding: 1rem 1.5rem;
+  background-color: #2d2d2d;
+  border-top: 1px solid #3d3d3d;
+  display: flex;
+  justify-content: flex-end;
+  gap: 1rem;
+}
+
+.modal-btn {
+  padding: 0.6rem 1.5rem;
+  font-size: 0.9rem;
+  font-weight: bold;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: opacity 0.2s;
+}
+
+.modal-btn:hover {
+  opacity: 0.9;
+}
+
+.btn-reject {
+  background-color: #c62828;
+}
+
+.btn-approve {
+  background-color: #2e7d32;
+}
+
+@keyframes scaleIn {
+  from { transform: scale(0.95); opacity: 0; }
+  to { transform: scale(1); opacity: 1; }
 }
 </style>

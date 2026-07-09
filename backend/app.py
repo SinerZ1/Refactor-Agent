@@ -1,15 +1,65 @@
+import asyncio
 import json
+from typing import Dict
 
 import uvicorn
 from agent_core import simple_refactor, stream_refactor
 from code_indexer import index_directory
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from graph_indexer import get_topology_data, index_to_neo4j
 from pydantic import BaseModel, ConfigDict, Field
 
 app = FastAPI(title="Refactor-Agent Backend")
+
+session_approvals: Dict[str, bool] = {}
+
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: Dict[str, WebSocket] = {}
+
+    async def connect(self, websocket: WebSocket, thread_id: str):
+        await websocket.accept()
+        self.active_connections[thread_id] = websocket
+        print(f"[WebSocket] Thread `{thread_id}` connected.")
+
+    def disconnect(self, thread_id: str):
+        if thread_id in self.active_connections:
+            del self.active_connections[thread_id]
+            print(f"[WebSocket] Thread `{thread_id}` disconnected.")
+
+    async def send_personal_message(self, message: dict, thread_id: str):
+        if thread_id in self.active_connections:
+            try:
+                await self.active_connections[thread_id].send_json(message)
+                print(f"[WebSocket] Sent message to thread `{thread_id}`: {message.get('type')}")
+            except Exception as e:
+                print(f"[WebSocket] Failed to send message to thread `{thread_id}`: {e}")
+
+manager = ConnectionManager()
+
+
+@app.websocket("/ws/refactor/{thread_id}")
+async def websocket_endpoint(websocket: WebSocket, thread_id: str):
+    await manager.connect(websocket, thread_id)
+    try:
+        while True:
+            data = await websocket.receive_json()
+            print(f"[WebSocket] Received message from thread `{thread_id}`: {data}")
+            
+            # 阶段 2: 处理审批放行/拒绝信号
+            if data.get("type") == "approval_response":
+                approved = data.get("approved", False)
+                session_approvals[thread_id] = approved
+                await websocket.send_json({"type": "approval_confirmed"})
+                print(f"[WebSocket] Approval saved for `{thread_id}`: {approved}")
+                
+    except WebSocketDisconnect:
+        manager.disconnect(thread_id)
+    except Exception as e:
+        print(f"[WebSocket Error] Thread `{thread_id}`: {e}")
+        manager.disconnect(thread_id)
 
 
 @app.on_event("startup")
@@ -86,10 +136,38 @@ def refactor_code_stream(request: RefactorRequest):
     if request.custom_model_config:
         config["configurable"].update(request.custom_model_config)
 
+    # 阶段 2：检测是否需要恢复已被挂起的执行
+    if request.thread_id in session_approvals:
+        approved = session_approvals.pop(request.thread_id)
+        config["configurable"]["resume_value"] = {"approved": approved}
+        print(f"[app] Resuming graph for thread `{request.thread_id}` with approved={approved}")
+
     def event_generator():
         for token in stream_refactor(request.code, request.thread_id, config):
             # 将每个 token 序列化为 JSON 以便前端解析
             yield f"data: {json.dumps({'token': token})}\n\n"
+            
+        # 阶段 2：执行完毕后，检查是否产生了新的挂起（Interrupt）
+        from agent import app_graph
+        try:
+            state = app_graph.get_state(config)
+            if state.interrupts:
+                # 存在挂起中断（即 write_code_file 工具调用前暂停）
+                interrupt_payload = state.interrupts[0].value
+                print(f"[app] Graph suspended on interrupt for `{request.thread_id}`. Sending WS message.")
+                
+                # 线程安全地异步提交发送 WebSocket 消息给主事件循环
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.run_coroutine_threadsafe(
+                        manager.send_personal_message({
+                            "type": "approval_request",
+                            "payload": interrupt_payload
+                        }, request.thread_id),
+                        loop
+                    )
+        except Exception as e:
+            print(f"[app] Failed to check state interrupts: {e}")
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
