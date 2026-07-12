@@ -7,84 +7,90 @@
 - **NodeJS 环境**: Node.js `v24.17.0`，使用 `npm` 进行包管理
 - **Docker 容器**: Docker version `29.5.3`。
   - 在 Docker 中部署了 **Redis server v=8.8.0**，容器名称为 `my-redis`
-  - 进入命令行终端命令: `docker exec -it my-redis redis-cli`
+  - 命令行入口: `docker exec -it my-redis redis-cli`
 - **Neo4j 数据库**: Neo4j Desktop 2。
   - 本地实例名称: `Cyber-Refactor-Agent-Database` (Version: 2026.05.0)
   - 连接 URI: `neo4j://127.0.0.1:7687` (或 `bolt://127.0.0.1:7687`)
   - 认证信息: Username=`neo4j`，Password=`Siner5920`
-- **目录结构**:
-  - `CodeSmells/`: 存放待重构的 Python 历史代码（包含故意设计的坏味道代码）。
-  - `backend/`: FastAPI 后端与 LangGraph 多智能体引擎。
-  - `frontend/`: Vue 3 + Vite + TypeScript 前端。
 
 ---
 
-## 2. 后端开发环境与快捷命令
+## 2. 核心目录与模块化架构
+- `CodeSmells/`: 存放待重构的 Python 历史代码（包含故意设计的坏味道代码）。
+- `backend/`: FastAPI 后端与 LangGraph 多智能体引擎。
+  - **核心重构变更**: `agent_core.py` 现已只是无缝重导出的包装层。真正的核心逻辑被完全拆分在 `backend/agent/` 子包内：
+    - `state.py`: 图状态定义。
+    - `prompts.py`: 角色 System Prompts。
+    - `tools.py`: 工具库。
+    - `nodes.py`: 节点逻辑（支持运行时隔离实例化大模型）。
+    - `edges.py`: 条件路由（审查重试与结束）。
+    - `workflow.py`: 状态图编排编译。
+  - `backend/scripts/`: 重建的核心脚本包，使用 `.pth` 注入虚拟环境解决 Windows 下子进程命令报错。
+- `frontend/`: Vue 3 + Vite + TypeScript 前端。
+
+---
+
+## 3. 后端开发环境与快捷命令
 所有后端命令必须在 `backend/` 目录下执行，且必须使用虚拟环境（venv）路径：
 - **Python 解释器**: `backend/venv/Scripts/python.exe`
 - **启动服务**: `backend/venv/Scripts/python.exe app.py` (运行在 `http://127.0.0.1:8000`)
 - **虚拟环境内置脚本** (位于 `backend/venv/Scripts/`，在 Windows 下直接运行)：
   - 代码格式化/导入排序: `backend/venv/Scripts/format.exe`, `backend/venv/Scripts/sort-imports.exe`
   - 格式与类型检查: `backend/venv/Scripts/check-format.exe`, `backend/venv/Scripts/check-sort-imports.exe`, `backend/venv/Scripts/check-mypy.exe`, `backend/venv/Scripts/check-lint.exe`
-  - 运行单元测试: `backend/venv/Scripts/test.exe` (或 `test-verbose.exe`, `backend/venv/Scripts/test-coverage.exe`)
+  - 运行单元测试: `backend/venv/Scripts/test.exe`
   - 扫描死代码: `backend/venv/Scripts/find-dead-code.exe`
 
 ---
 
-## 3. 数据库与 RAG 索引降级机制
+## 4. 数据库与 RAG 索引降级机制
 - **静态 AST 解析**: 后端在启动时会自动扫描 `CodeSmells/`，生成 AST 符号索引（`SYMBOL_INDEX`）。
-- **Neo4j 数据库**: 后端会尝试将依赖关系写入 Neo4j (`bolt://localhost:7687`)。**特别注意**: 如果 Neo4j 服务未启动，系统会自动优雅降级为**内存 AST 调用图模式**，不会导致崩溃。
-- **Redis 记忆持久化**: 优先读取 Docker 容器中的 Redis，若检测到环境变量 `REDIS_URL` 则加载 `RedisSaver`，否则优雅降级为 `MemorySaver`。
+- **Neo4j 数据库**: 后端会尝试将依赖关系写入 Neo4j。**特别注意**: 如果 Neo4j 服务未启动，系统会自动优雅降级为**内存 AST 调用图模式**，不会导致崩溃。
+- **Redis 记忆持久化**: 优先读取 Docker 容器中的 Redis (`REDIS_URL`) 进行状态持久化，否则优雅降级为 `MemorySaver`。
 
 ---
 
-## 4. 前端开发环境与命令
+## 5. 前端开发环境与命令
 所有前端命令必须在 `frontend/` 目录下运行，使用 `npm` 进行包管理：
 - **启动开发服务器**: `npm run dev` (默认端口 `5173`)
 - **类型检查**: `npm run type-check` (基于 `vue-tsc --build`)
 - **前端 Lint**: `npm run lint` (并行运行 `oxlint . --fix` 与 `eslint . --fix --cache`)
 - **前端格式化**: `npm run format` (基于 `prettier --write`)
-- **单元测试**: `npm run test:unit` (基于 Vitest)
-- **E2E 测试**: `npm run test:e2e` (基于 Playwright；在 CI 运行时需先执行 `npm run build`)
+- **单元测试**: `npm run test:unit`
+- **E2E 测试**: `npm run test:e2e`
 
 ---
 
-## 5. 前后端分离与 Agent 通信架构
-- **流式 SSE (Server-Sent Events) 单向流**:
-  - **用途**: 用来把 Agent 的 Thought（思考过程）、Tool Call（终端执行日志等）像打字机一样实时流式推送到 Vue 3 前端。
-- **双向 WebSocket 全双工**:
-  - **用途**: 用于承载多智能体（A2A）的聊天室互动（如 CoderAgent 和 ReviewerAgent 甩锅讨论），以及在敏感/危险操作前（如 `write_code_file`），让 Agent 挂起并向前端发起 “人机协作审批（HITL）” 弹窗。用户在 Vue 界面点击“批准”后，信号通过 WebSocket 传回后端放行。
-- **动态多模型兼容**:
-  - 支持智谱、GPT、Gemini、GLM 等 API 兼容格式。模型名称、Base URL、API KEY 等配置从前端获取，后端需要动态解析、适配和加载，不能写死。
+## 6. 前后端分离、多通道架构与可视化面板
+本项目包含极强的协同架构与可视化呈现：
+- **双轨通信通道**:
+  - **流式 SSE (单向流)**: 把 Agent 的 Thought（思考过程）、Tool Call（终端执行日志）实时打字机推送到 Vue 3 前端。
+  - **WebSocket (全双工)**: 承载 CoderAgent、ReviewerAgent 的多智能体 A2A 聊天室交流；在敏感写入操作前挂起 Agent 并触发 “人机协作审批（HITL）” 双屏 Diff 弹窗。
+- **动态多模型适配器**: 支持 OpenAI, DeepSeek, Zhipu, Gemini Studio, Google Vertex AI。支持本地 ADC (Application Default Credentials) 凭证文件加载。
+- **双图并进视图**:
+  - **图谱探查器 (ECharts)**: 基于 Neo4j 的代码依赖关系力导向网状图谱。
+  - **任务 DAG 追踪 (Vue Flow)**: 渲染重构任务节点（带有呼吸灯与流动动效的依赖图）。
 
 ---
 
-## 6. LangGraph 多智能体协同约束与代码实现要求 (核心)
-在修改或开发 `backend/agent_core.py` 时，必须严格遵循以下规则：
+## 7. LangGraph 多智能体协同约束与代码实现要求
+在修改 `backend/agent/` 内逻辑时，必须严格遵循：
+- **工作流节点**: `Architect` -> `Developer` -> `Reviewer`。
+- **审查条件路由**:
+  - 失败时，回复内容 **必须** 包含 `【REFACTOR_FAIL】`，触发 `developer_retry` 退回（最多 3 次）。
+  - 成功时，回复内容 **必须** 包含 `【REFACTOR_SUCCESS】` 以结束流程。
+- **工具权限**:
+  - `Architect`: 绑 `read_code_file`, `search_symbol_definition`, `query_neo4j_topology`。严禁写文件。
+  - `Developer`: 绑 `read_code_file`, `write_code_file`, `search_symbol_definition`。
+  - `Reviewer`: 绑 `run_unit_tests`。严禁读写文件。
 
-### A. 工作流与状态机设计
-- **工作流节点**: `Architect` (架构师) -> `Developer` (开发者) -> `Reviewer` (审查者)。
-- **审查反馈流转条件 (Reviewer Routing)**:
-  - 审查失败时，Reviewer 的回复内容 **必须** 包含 `【REFACTOR_FAIL】` 字符串，以此触发条件路由，退回至 `developer_retry` 节点（最多重试 3 次）。
-  - 审查成功时，Reviewer 的回复内容 **必须** 包含 `【REFACTOR_SUCCESS】` 结束流程。
-- **智能体工具权限限制**:
-  - `Architect`: 绑定 `read_code_file`, `search_symbol_definition`, `query_neo4j_topology`。**严禁绑定任何写文件工具**。
-  - `Developer`: 绑定 `read_code_file`, `write_code_file`, `search_symbol_definition`。
-  - `Reviewer`: 绑定 `run_unit_tests`。**严禁绑定读写文件工具**。
-
-### B. 教学与理论落地级注释要求
-本项目的代码实现具有强烈的教学和学习向性质，所有新增或修改的代码在注释中必须包含：
-1. **教学级架构与设计注释**: 拒绝基础 Python 语法解释，把注释空间全部留给 Agent 架构、状态流转和机制。
-2. **理论与实践关联**: 在代码的关键地方标注理论概念（如：“*此处在底层相当于 Hello-Agents 课程里讲过的 ToolResponse 协议/上下文持久化，只是在 LangGraph 中我们通过 Graph State 和 Checkpointer 这样来实现...*”）。
-3. **决策与设计决策记录**: 每次设计复杂的 Agent 决策链路、条件边（Conditional Edge）或提示词工程（Prompt Engineering）时，在注释中写明：
-   - **为什么要这样设计？** (设计初衷)
-   - **有没有备选方案？** (Trade-offs 权衡)
-   - **针对模型表现如何进行微调/做防御性编程？** (如防报错、防幻觉、处理原生 Gemini 异构工具格式等)
+### 教学与理论落地级注释要求
+本项目的代码必须具有强烈的教学性质：
+1. **教学级架构与设计注释**: 拒绝基础 Python 语法解释，把注释留给 Agent 架构、状态流转机制。
+2. **理论与实践关联**: 在代码中关联学术概念（如：“*此处相当于 Hello-Agents 讲过的 ToolResponse 协议，在 LangGraph 中通过 Graph State 与 Checkpointer 实现...*”；HITL 相当于中断与状态机覆写）。
+3. **决策记录**: 写明复杂决策链路的初衷、Trade-offs 权衡、防御性编程与防幻觉设计。
 
 ---
 
-## 7. Git 提交规范
-- 必须在完成**每一个阶段的功能**后立即进行 Git 提交。
-- Git Commit Message 必须简洁明了，使用**中文**，去除明显的“AI 味”，保持普通程序员真实开发时的书写风格。
-  - *示例*: `feat: 实现基于 FastAPI 的 WebSocket HITL 双向审批机制`
-  - *示例*: `fix: 修复 Reviewer 节点因未检测到 REFACTOR_FAIL 产生无限循环的 Bug`
+## 8. Git 提交规范
+- 完成**每一个阶段的功能**后立即进行 Git 提交。
+- Git Commit Message 使用**中文**，简洁明了，去除“AI 味”，贴近普通程序员的书写风格。
