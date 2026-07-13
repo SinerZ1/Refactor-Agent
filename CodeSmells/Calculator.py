@@ -36,7 +36,7 @@ def run():
     while True:
         # 坏味道 9: 过长的函数 - 把输入、逻辑、输出全塞在一个函数里
         # 坏味道 10: 不一致的缩进和糟糕的格式 - 下面故意留了奇怪的空格和缩进
-      x = input("Enter first num: ")
+        x = input("Enter first num: ")
         y = input("Enter second num: ")
         z = input("Enter op (j-add, c-mul, d-div): ")
         
