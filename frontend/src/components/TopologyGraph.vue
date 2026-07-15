@@ -128,18 +128,31 @@ const handleResize = () => {
   myChart?.resize()
 }
 
+let resizeObserver: ResizeObserver | null = null
+
 onMounted(() => {
   fetchTopology()
   window.addEventListener('resize', handleResize)
+  
+  if (graphRef.value) {
+    resizeObserver = new ResizeObserver(() => {
+      myChart?.resize()
+    })
+    resizeObserver.observe(graphRef.value)
+  }
 })
 
 onUnmounted(() => {
   window.removeEventListener('resize', handleResize)
+  if (resizeObserver) {
+    resizeObserver.disconnect()
+  }
   myChart?.dispose()
 })
 
 defineExpose({
   refresh: fetchTopology,
+  resize: handleResize
 })
 </script>
 

@@ -2,6 +2,7 @@ import os
 import subprocess
 
 from langchain_core.tools import tool
+from langgraph.errors import GraphInterrupt
 from langgraph.types import interrupt
 
 # ============================================================
@@ -13,13 +14,26 @@ from langgraph.types import interrupt
 # ============================================================
 
 
+def get_project_root() -> str:
+    """获取项目根目录，即 backend 的上一级目录"""
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), "../../"))
+
+
+def resolve_path(file_path: str) -> str:
+    """将相对路径解析为基于项目根目录的绝对路径"""
+    if os.path.isabs(file_path):
+        return file_path
+    return os.path.join(get_project_root(), file_path)
+
+
 @tool
 def read_code_file(file_path: str) -> str:
     """
     读取指定路径下的本地代码文件内容。当需要查看某个具体文件的代码时使用。
     """
     try:
-        with open(file_path, "r", encoding="utf-8") as f:
+        abs_path = resolve_path(file_path)
+        with open(abs_path, "r", encoding="utf-8") as f:
             return f.read()
     except Exception as e:
         return f"读取文件失败: {str(e)}"
@@ -31,11 +45,12 @@ def write_code_file(file_path: str, content: str) -> str:
     将重构后的完整代码写入到指定的本地文件路径中。当重构完成并且需要保存修改时使用。
     """
     try:
+        abs_path = resolve_path(file_path)
         # 获取原文件代码（如果存在），供前端展示 Diff 对比
         original_code = ""
-        if os.path.exists(file_path):
+        if os.path.exists(abs_path):
             try:
-                with open(file_path, "r", encoding="utf-8") as f:
+                with open(abs_path, "r", encoding="utf-8") as f:
                     original_code = f.read()
             except Exception:
                 pass
@@ -46,7 +61,7 @@ def write_code_file(file_path: str, content: str) -> str:
         approval_res = interrupt(
             {
                 "type": "write_approval",
-                "file_path": file_path,
+                "file_path": abs_path,
                 "original_code": original_code,
                 "refactored_code": content,
             }
@@ -61,16 +76,20 @@ def write_code_file(file_path: str, content: str) -> str:
 
         if not approved:
             return (
-                f"写入文件 `{file_path}` 失败：用户在人机协作审批中点击拒绝，打回修改。"
+                f"写入文件 `{abs_path}` 失败：用户在人机协作审批中点击拒绝，打回修改。"
             )
 
         # 审批通过，执行本地写入
-        dir_name = os.path.dirname(os.path.abspath(file_path))
+        dir_name = os.path.dirname(abs_path)
         if dir_name:
             os.makedirs(dir_name, exist_ok=True)
-        with open(file_path, "w", encoding="utf-8") as f:
+        with open(abs_path, "w", encoding="utf-8") as f:
             f.write(content)
-        return f"成功将重构代码写入到文件: {file_path}"
+        return f"成功将重构代码写入到文件: {abs_path}"
+    except GraphInterrupt:
+        # 重要：必须重新抛出 GraphInterrupt，否则会被底下的 Exception 捕获
+        # 从而导致 LangGraph 的中断挂起机制失效，直接把打断异常当作普通错误返回给大模型
+        raise
     except Exception as e:
         return f"写入文件失败: {str(e)}"
 

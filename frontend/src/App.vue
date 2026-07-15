@@ -148,47 +148,55 @@ onMounted(() => {
 const activeTab = ref<'code' | 'dag' | 'topology'>('code')
 const topologyGraphRef = ref<InstanceType<typeof TopologyGraph> | null>(null)
 
+watch(activeTab, (newTab) => {
+  if (newTab === 'topology') {
+    nextTick(() => {
+      topologyGraphRef.value?.resize()
+    })
+  }
+})
+
 // 阶段 4：重构任务 DAG 面板 (Vue Flow 动态状态管理)
 const dagNodes = ref<Node[]>([
   {
     id: 'architect_task',
     label: '📐 架构分析与重构规划',
-    position: { x: 30, y: 180 },
+    position: { x: 50, y: 180 },
     class: 'dag-node-pending',
     data: { status: 'pending', title: 'Architect Task' },
   },
   {
     id: 'models_py',
     label: '📦 重构 models.py (数据模型)',
-    position: { x: 260, y: 50 },
+    position: { x: 320, y: 50 },
     class: 'dag-node-pending',
     data: { status: 'pending', file: 'models.py' },
   },
   {
     id: 'calculator_py',
     label: '🧮 重构 Calculator.py (业务计算)',
-    position: { x: 260, y: 180 },
+    position: { x: 320, y: 180 },
     class: 'dag-node-pending',
     data: { status: 'pending', file: 'Calculator.py' },
   },
   {
     id: 'services_py',
     label: '🛠️ 重构 services.py (系统服务)',
-    position: { x: 260, y: 310 },
+    position: { x: 320, y: 310 },
     class: 'dag-node-pending',
     data: { status: 'pending', file: 'services.py' },
   },
   {
     id: 'main_py',
     label: '🚀 重构 main.py (入口编排)',
-    position: { x: 500, y: 180 },
+    position: { x: 590, y: 180 },
     class: 'dag-node-pending',
     data: { status: 'pending', file: 'main.py' },
   },
   {
     id: 'reviewer_task',
     label: '🛡️ Reviewer 自动化单元测试',
-    position: { x: 740, y: 180 },
+    position: { x: 860, y: 180 },
     class: 'dag-node-pending',
     data: { status: 'pending', title: 'Reviewer Task' },
   },
@@ -872,6 +880,9 @@ const handleSendChatMessage = () => {
 </template>
 
 <style scoped>
+@import '@vue-flow/core/dist/style.css';
+@import '@vue-flow/core/dist/theme-default.css';
+
 .app-container {
   display: flex;
   flex-direction: column;
@@ -1528,44 +1539,42 @@ const handleSendChatMessage = () => {
 }
 
 /* 阶段 4：Vue Flow DAG 样式与动效 */
-@import '@vue-flow/core/dist/style.css';
-@import '@vue-flow/core/dist/theme-default.css';
-
-.vue-flow {
+:deep(.vue-flow) {
   background-color: #1a1a1a !important;
 }
 
-.vue-flow__node {
+:deep(.vue-flow__node) {
   border-radius: 8px !important;
-  font-size: 11.5px !important;
+  font-size: 12.5px !important;
   font-weight: bold !important;
-  padding: 10px !important;
+  padding: 12px !important;
   text-align: center !important;
   box-shadow: 0 4px 6px rgba(0, 0, 0, 0.4) !important;
-  width: 185px !important;
+  width: 210px !important;
   transition: all 0.3s ease !important;
+  color: #eee !important;
 }
 
-.dag-node-pending {
+:deep(.dag-node-pending) {
   background-color: #2a2a2a !important;
-  color: #777 !important;
-  border: 2px solid #3d3d3d !important;
+  color: #999 !important;
+  border: 2px solid #444 !important;
 }
 
-.dag-node-in_progress {
+:deep(.dag-node-in_progress) {
   background-color: #3e2723 !important;
   color: #ffb74d !important;
   border: 2px solid #ff9800 !important;
   animation: breathing 1.5s infinite ease-in-out !important;
 }
 
-.dag-node-completed {
+:deep(.dag-node-completed) {
   background-color: #1b5e20 !important;
   color: #81c784 !important;
   border: 2px solid #4fc08d !important;
 }
 
-.dag-node-failed {
+:deep(.dag-node-failed) {
   background-color: #b71c1c !important;
   color: #e57373 !important;
   border: 2px solid #f44336 !important;
