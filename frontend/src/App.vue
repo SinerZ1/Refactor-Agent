@@ -10,7 +10,7 @@ import TopologyGraph from './components/TopologyGraph.vue'
 const sourceCode = ref('CodeSmells/main.py') // 默认要重构的测试文件路径
 const refactoredCode = ref('')
 const isRefactoring = ref(false)
-const agentLogs = ref<{ type: 'info' | 'success' | 'error'; message: string }[]>([])
+const agentLogs = ref<{ type: 'info' | 'success' | 'error'; message: string; time: string }[]>([])
 
 // 阶段 4：会话与多轮对话记忆状态
 const threadId = ref('session_' + Math.random().toString(36).substring(2, 9))
@@ -404,7 +404,7 @@ const sendStreamRequest = async (payloadText: string, isInitialTurn: boolean) =>
 
               if (token.startsWith('[INFO]')) {
                 const cleanMsg = token.replace('[INFO]', '').trim()
-                agentLogs.value.push({ type: 'info', message: cleanMsg })
+                agentLogs.value.push({ type: 'info', message: cleanMsg, time: new Date().toLocaleTimeString() })
 
                 // 阶段 4：从日志中解析重构任务的当前状态并触发 DAG 状态变化
                 if (cleanMsg.includes('Architect')) {
@@ -423,7 +423,7 @@ const sendStreamRequest = async (payloadText: string, isInitialTurn: boolean) =>
                 }
               } else if (token.startsWith('[SUCCESS]')) {
                 const cleanMsg = token.replace('[SUCCESS]', '').trim()
-                agentLogs.value.push({ type: 'success', message: cleanMsg })
+                agentLogs.value.push({ type: 'success', message: cleanMsg, time: new Date().toLocaleTimeString() })
 
                 // 阶段 4：工具执行成功，代表对应文件重构完成，点亮绿灯
                 if (cleanMsg.includes('write_code_file')) {
@@ -440,6 +440,7 @@ const sendStreamRequest = async (payloadText: string, isInitialTurn: boolean) =>
                 agentLogs.value.push({
                   type: 'error',
                   message: token.replace('[ERROR]', '').trim(),
+                  time: new Date().toLocaleTimeString()
                 })
               } else if (token.startsWith('[APPROVAL_REQUEST]')) {
                 // 阶段 2：通过 SSE 备用通道接收审批请求，防止 WebSocket 断连导致无响应
@@ -479,7 +480,7 @@ const sendStreamRequest = async (payloadText: string, isInitialTurn: boolean) =>
     }
   } catch (error) {
     console.error('SSE Error:', error)
-    agentLogs.value.push({ type: 'error', message: `错误: ${error}` })
+    agentLogs.value.push({ type: 'error', message: `错误: ${error}`, time: new Date().toLocaleTimeString() })
     if (chatMessages.value[agentMessageIndex]) {
       chatMessages.value[agentMessageIndex].text =
         `[重构失败] 无法完成此次对话，请检查后端运行状态。`
@@ -797,7 +798,7 @@ const handleSendChatMessage = () => {
             <div ref="logContainerRef" class="log-content">
               <div v-if="agentLogs.length === 0" class="empty-logs">等待 Agent 执行操作...</div>
               <div v-for="(log, idx) in agentLogs" :key="idx" :class="['log-item', log.type]">
-                <span class="log-time">[{{ new Date().toLocaleTimeString() }}]</span>
+                <span class="log-time">[{{ log.time }}]</span>
                 <pre class="log-message">{{ log.message }}</pre>
               </div>
             </div>

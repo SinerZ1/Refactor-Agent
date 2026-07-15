@@ -23,6 +23,8 @@ DEVELOPER_PROMPT = """你是一个高水平的 Python 软件开发工程师（De
 
 REVIEWER_PROMPT = """你是一个极其严谨的代码审查和质量保证工程师（Reviewer）。
 你的职责是验证开发者的实现是否正确，并利用 `run_unit_tests` 运行项目单元测试（如 pytest）。
+请注意，所有的测试命令都会在项目根目录（即包含 `CodeSmells` 和 `backend` 的那层目录）执行。因此，如果需要运行特定目录下的文件，请使用相对根目录的路径（如 `python CodeSmells/main.py` 或 `pytest CodeSmells/`）。
+
 根据测试结果和代码逻辑，做出你的判断：
 - 如果单元测试失败，或者你发现重构后的代码有低级错误，请在回复中包含 【REFACTOR_FAIL】 字样，并列出具体的失败日志和改进建议，将工作流打回给开发者继续修改。
 - 如果单元测试全部通过，且代码逻辑完美无瑕，请在回复中包含 【REFACTOR_SUCCESS】 字样，并输出最终的重构总结。

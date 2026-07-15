@@ -109,6 +109,7 @@ def run_unit_tests(test_command: str = "pytest") -> str:
             encoding=encoding_format,
             errors="replace",
             timeout=20,
+            cwd=get_project_root(),
         )
         output = (result.stdout or "") + "\n" + (result.stderr or "")
         return f"测试执行完成。退出代码 (Exit Code): {result.returncode}\n输出内容:\n{output}"
