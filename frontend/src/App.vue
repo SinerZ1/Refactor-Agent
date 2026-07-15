@@ -441,6 +441,16 @@ const sendStreamRequest = async (payloadText: string, isInitialTurn: boolean) =>
                   type: 'error',
                   message: token.replace('[ERROR]', '').trim(),
                 })
+              } else if (token.startsWith('[APPROVAL_REQUEST]')) {
+                // 阶段 2：通过 SSE 备用通道接收审批请求，防止 WebSocket 断连导致无响应
+                try {
+                  const payloadStr = token.replace('[APPROVAL_REQUEST]', '')
+                  const payloadObj = JSON.parse(payloadStr)
+                  approvalPayload.value = payloadObj
+                  isApprovalModalOpen.value = true
+                } catch (e) {
+                  console.error('解析 SSE 审批请求失败:', e)
+                }
               } else {
                 // 累积代码文本并更新视图
                 accumulatedResponse += token

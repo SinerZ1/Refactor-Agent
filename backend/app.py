@@ -3,6 +3,7 @@ import json
 from typing import Dict
 
 import uvicorn
+from anyio.from_thread import run
 from agent_core import simple_refactor, stream_refactor
 from code_indexer import index_directory
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -77,8 +78,12 @@ async def send_chatroom_message(thread_id: str, sender: str, content: str):
     )
 
 
+main_loop = None
+
 @app.on_event("startup")
 def startup_event():
+    global main_loop
+    main_loop = asyncio.get_event_loop()
     # 启动时自动静态扫描 CodeSmells 目录，构建 AST 符号索引
     index_directory()
     # 启动时同时将代码库关系索引至 Neo4j 中
@@ -135,7 +140,6 @@ def refactor_code(request: RefactorRequest):
     config = {
         "configurable": {
             "thread_id": request.thread_id,
-            "ws_callback": send_chatroom_message,
         }
     }
     if request.custom_model_config:
@@ -155,7 +159,6 @@ def refactor_code_stream(request: RefactorRequest):
     config = {
         "configurable": {
             "thread_id": request.thread_id,
-            "ws_callback": send_chatroom_message,
         }
     }
     if request.custom_model_config:
@@ -170,7 +173,7 @@ def refactor_code_stream(request: RefactorRequest):
         )
 
     def event_generator():
-        for token in stream_refactor(request.code, request.thread_id, config):
+        for token in stream_refactor(request.code, request.thread_id, config, send_chatroom_message, main_loop):
             # 将每个 token 序列化为 JSON 以便前端解析
             yield f"data: {json.dumps({'token': token})}\n\n"
 
@@ -183,19 +186,27 @@ def refactor_code_stream(request: RefactorRequest):
                 # 存在挂起中断（即 write_code_file 工具调用前暂停）
                 interrupt_payload = state.interrupts[0].value
                 print(
-                    f"[app] Graph suspended on interrupt for `{request.thread_id}`. Sending WS message."
+                    f"[app] Graph suspended on interrupt for `{request.thread_id}`. Sending WS message and SSE token."
                 )
+                
+                # 方案 A：通过 SSE 确保前端必定收到
+                yield f"data: {json.dumps({'token': '[APPROVAL_REQUEST]' + json.dumps(interrupt_payload)})}\n\n"
 
-                # 线程安全地异步提交发送 WebSocket 消息给主事件循环
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    asyncio.run_coroutine_threadsafe(
-                        manager.send_personal_message(
-                            {"type": "approval_request", "payload": interrupt_payload},
-                            request.thread_id,
-                        ),
-                        loop,
-                    )
+                # 方案 B：同时尝试通过 WebSocket 发送（向下兼容）
+                try:
+                    loop = main_loop
+                    if loop and loop.is_running():
+                        asyncio.run_coroutine_threadsafe(
+                            manager.send_personal_message(
+                                {"type": "approval_request", "payload": interrupt_payload},
+                                request.thread_id,
+                            ),
+                            loop,
+                        )
+                except Exception as ex:
+                    print(f"[app] ERROR: Cannot send WS message using run_coroutine_threadsafe: {ex}")
+            else:
+                print(f"[app] No interrupts found for thread `{request.thread_id}` after stream_refactor.")
         except Exception as e:
             print(f"[app] Failed to check state interrupts: {e}")
 

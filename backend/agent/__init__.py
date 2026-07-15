@@ -1,5 +1,6 @@
 import asyncio
 import json
+from anyio.from_thread import run
 
 from langchain_core.messages import HumanMessage
 
@@ -24,7 +25,7 @@ def simple_refactor(code: str, config: dict = None) -> str:
         return f"# [运行失败]\n# 错误信息: {str(e)}"
 
 
-def stream_refactor(code: str, thread_id: str = "default_session", config: dict = None):
+def stream_refactor(code: str, thread_id: str = "default_session", config: dict = None, ws_callback=None, main_loop=None):
     """
     使用 LangGraph 状态图执行多轮对话流式生成器
     """
@@ -91,11 +92,10 @@ def stream_refactor(code: str, thread_id: str = "default_session", config: dict 
                                     else "ArchitectAgent"
                                 )
                             )
-                            ws_callback = run_config["configurable"].get("ws_callback")
                             if ws_callback:
                                 try:
-                                    loop = asyncio.get_event_loop()
-                                    if loop.is_running():
+                                    loop = main_loop
+                                    if loop and loop.is_running():
                                         asyncio.run_coroutine_threadsafe(
                                             ws_callback(
                                                 thread_id, sender_name, msg.content
@@ -114,5 +114,7 @@ def stream_refactor(code: str, thread_id: str = "default_session", config: dict 
                                 yield text_content[i : i + chunk_size]
                 elif node_name == "developer_retry":
                     yield "\n[SYSTEM] 检测到审查未通过，已启动开发者重试节点...\n"
+                elif node_name == "__interrupt__":
+                    yield "\n[SYSTEM] 触发人机协作审查 (HITL)，请在弹窗中确认文件写入操作...\n"
     except Exception as e:
         yield f"\n# [运行失败]\n# 错误信息: {str(e)}\n"
