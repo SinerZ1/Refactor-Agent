@@ -111,7 +111,10 @@ def run_unit_tests(test_command: str = "pytest") -> str:
             timeout=20,
             cwd=get_project_root(),
         )
-        output = (result.stdout or "") + "\n" + (result.stderr or "")
+        output = (result.stdout or "").strip() + "\n" + (result.stderr or "").strip()
+        output = output.strip()
+        if not output:
+            output = "<无任何标准输出或错误输出 (No output)>"
         return f"测试执行完成。退出代码 (Exit Code): {result.returncode}\n输出内容:\n{output}"
     except Exception as e:
         return f"运行测试失败: {str(e)}"
