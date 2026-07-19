@@ -1,9 +1,30 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import * as echarts from 'echarts'
+
+const props = defineProps<{
+  theme: 'light' | 'dark'
+}>()
+
+interface TopologyNode {
+  name: string
+  type: string
+  file_path: string
+}
+
+interface TopologyLink {
+  source: string
+  target: string
+}
+
+interface TopologyData {
+  nodes: TopologyNode[]
+  links: TopologyLink[]
+}
 
 const graphRef = ref<HTMLDivElement | null>(null)
 let myChart: echarts.ECharts | null = null
+let latestTopology: TopologyData | null = null
 
 const loading = ref(false)
 const errorMsg = ref('')
@@ -17,26 +38,39 @@ const fetchTopology = async () => {
     if (!res.ok) throw new Error('无法连接后端 API')
     const data = await res.json()
     isFallback.value = data.fallback || false
+    latestTopology = { nodes: data.nodes, links: data.links }
 
     await nextTick()
     renderChart(data.nodes, data.links)
-  } catch (err: any) {
+  } catch (err: unknown) {
     console.error(err)
-    errorMsg.value = err.message || '获取图谱失败'
+    errorMsg.value = err instanceof Error ? err.message : '获取图谱失败'
   } finally {
     loading.value = false
   }
 }
 
-const renderChart = (nodes: any[], links: any[]) => {
+const renderChart = (nodes: TopologyNode[], links: TopologyLink[]) => {
   if (!graphRef.value) return
+
+  const isDark = props.theme === 'dark'
+  const palette = {
+    classNode: isDark ? '#60a5fa' : '#2563eb',
+    functionNode: isDark ? '#2dd4bf' : '#0f766e',
+    tooltipBackground: isDark ? '#151b2b' : '#ffffff',
+    tooltipBorder: isDark ? '#6476ff' : '#4f46e5',
+    tooltipText: isDark ? '#f8fafc' : '#172033',
+    label: isDark ? '#d9e1f2' : '#334155',
+    edge: isDark ? '#71809d' : '#94a3b8',
+    emphasis: isDark ? '#a5b4fc' : '#4f46e5',
+  }
 
   if (!myChart) {
     myChart = echarts.init(graphRef.value)
   }
 
   // 格式化节点数据
-  const formattedNodes = nodes.map((node: any) => {
+  const formattedNodes = nodes.map((node) => {
     const isClass = node.type === 'Class'
     return {
       id: node.name,
@@ -45,7 +79,7 @@ const renderChart = (nodes: any[], links: any[]) => {
       value: node.file_path,
       category: isClass ? 0 : 1,
       itemStyle: {
-        color: isClass ? '#4fc08d' : '#29b6f6',
+        color: isClass ? palette.classNode : palette.functionNode,
       },
       tooltip: {
         formatter: `<strong>${node.name}</strong><br/>类型: ${node.type}<br/>位置: ${node.file_path}`,
@@ -54,7 +88,7 @@ const renderChart = (nodes: any[], links: any[]) => {
   })
 
   // 格式化连线数据
-  const formattedLinks = links.map((link: any) => {
+  const formattedLinks = links.map((link) => {
     return {
       source: link.source,
       target: link.target,
@@ -68,11 +102,11 @@ const renderChart = (nodes: any[], links: any[]) => {
   const option: echarts.EChartsOption = {
     tooltip: {
       trigger: 'item',
-      backgroundColor: '#2d2d2d',
-      borderColor: '#4fc08d',
+      backgroundColor: palette.tooltipBackground,
+      borderColor: palette.tooltipBorder,
       borderWidth: 1,
       textStyle: {
-        color: '#fff',
+        color: palette.tooltipText,
         fontSize: 12,
       },
     },
@@ -80,7 +114,7 @@ const renderChart = (nodes: any[], links: any[]) => {
       {
         data: ['类 (Class)', '函数 (Function)'],
         textStyle: {
-          color: '#ccc',
+          color: palette.label,
         },
         top: '5%',
       },
@@ -96,7 +130,7 @@ const renderChart = (nodes: any[], links: any[]) => {
         label: {
           show: true,
           position: 'right',
-          color: '#ddd',
+          color: palette.label,
           fontSize: 11,
         },
         force: {
@@ -107,22 +141,31 @@ const renderChart = (nodes: any[], links: any[]) => {
         edgeSymbol: ['none', 'arrow'],
         edgeSymbolSize: [4, 8],
         lineStyle: {
-          color: '#888',
+          color: palette.edge,
           opacity: 0.6,
         },
         emphasis: {
           focus: 'adjacency',
           lineStyle: {
             width: 4,
-            color: '#ffaa00',
+            color: palette.emphasis,
           },
         },
       },
     ],
   }
 
-  myChart.setOption(option)
+  myChart.setOption(option, true)
 }
+
+watch(
+  () => props.theme,
+  () => {
+    if (latestTopology) {
+      renderChart(latestTopology.nodes, latestTopology.links)
+    }
+  },
+)
 
 const handleResize = () => {
   myChart?.resize()
@@ -133,7 +176,7 @@ let resizeObserver: ResizeObserver | null = null
 onMounted(() => {
   fetchTopology()
   window.addEventListener('resize', handleResize)
-  
+
   if (graphRef.value) {
     resizeObserver = new ResizeObserver(() => {
       myChart?.resize()
@@ -152,7 +195,7 @@ onUnmounted(() => {
 
 defineExpose({
   refresh: fetchTopology,
-  resize: handleResize
+  resize: handleResize,
 })
 </script>
 

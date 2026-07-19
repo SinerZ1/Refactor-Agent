@@ -1,10 +1,47 @@
 <script setup lang="ts">
-import { ref, computed, nextTick, watch, onMounted } from 'vue'
-import hljs from 'highlight.js'
-import 'highlight.js/styles/vs2015.css' // 使用 VS2015 深色代码高亮主题
-import { VueFlow } from '@vue-flow/core'
+import { ref, computed, nextTick, watch, onMounted, onUnmounted } from 'vue'
+import '@vue-flow/core/dist/style.css'
+import '@vue-flow/core/dist/theme-default.css'
+import { VueFlow, MarkerType } from '@vue-flow/core'
 import type { Node, Edge } from '@vue-flow/core'
 import TopologyGraph from './components/TopologyGraph.vue'
+
+type ThemePreference = 'light' | 'dark' | 'system'
+
+const THEME_STORAGE_KEY = 'refactor_agent_theme'
+const storedTheme = localStorage.getItem(THEME_STORAGE_KEY)
+const themePreference = ref<ThemePreference>(
+  storedTheme === 'light' || storedTheme === 'dark' || storedTheme === 'system'
+    ? storedTheme
+    : 'system',
+)
+const systemPrefersDark = ref(false)
+const resolvedTheme = computed<'light' | 'dark'>(() =>
+  themePreference.value === 'system'
+    ? systemPrefersDark.value
+      ? 'dark'
+      : 'light'
+    : themePreference.value,
+)
+const themeOptions: { value: ThemePreference; label: string; icon: string }[] = [
+  { value: 'light', label: '浅色', icon: '☀' },
+  { value: 'dark', label: '深色', icon: '☾' },
+  { value: 'system', label: '跟随系统', icon: '◐' },
+]
+
+let systemThemeQuery: MediaQueryList | null = null
+
+const syncSystemTheme = (event?: MediaQueryListEvent) => {
+  systemPrefersDark.value = event?.matches ?? systemThemeQuery?.matches ?? false
+}
+
+const setThemePreference = (theme: ThemePreference) => {
+  themePreference.value = theme
+}
+
+watch(themePreference, (theme) => {
+  localStorage.setItem(THEME_STORAGE_KEY, theme)
+})
 
 // 基础状态
 const sourceCode = ref('CodeSmells/main.py') // 默认要重构的测试文件路径
@@ -141,7 +178,16 @@ const handleReject = () => {
 
 // 挂载时启动
 onMounted(() => {
+  if (typeof window.matchMedia === 'function') {
+    systemThemeQuery = window.matchMedia('(prefers-color-scheme: dark)')
+    syncSystemTheme()
+    systemThemeQuery.addEventListener('change', syncSystemTheme)
+  }
   initWebSocket()
+})
+
+onUnmounted(() => {
+  systemThemeQuery?.removeEventListener('change', syncSystemTheme)
 })
 
 // 阶段 6: 视图切换和拓扑组件引用
@@ -209,6 +255,7 @@ const dagEdges = ref<Edge[]>([
     target: 'models_py',
     animated: false,
     style: { stroke: '#444' },
+    markerEnd: MarkerType.ArrowClosed,
   },
   {
     id: 'e2',
@@ -216,6 +263,7 @@ const dagEdges = ref<Edge[]>([
     target: 'calculator_py',
     animated: false,
     style: { stroke: '#444' },
+    markerEnd: MarkerType.ArrowClosed,
   },
   {
     id: 'e3',
@@ -223,14 +271,23 @@ const dagEdges = ref<Edge[]>([
     target: 'services_py',
     animated: false,
     style: { stroke: '#444' },
+    markerEnd: MarkerType.ArrowClosed,
   },
-  { id: 'e4', source: 'models_py', target: 'main_py', animated: false, style: { stroke: '#444' } },
+  {
+    id: 'e4',
+    source: 'models_py',
+    target: 'main_py',
+    animated: false,
+    style: { stroke: '#444' },
+    markerEnd: MarkerType.ArrowClosed,
+  },
   {
     id: 'e5',
     source: 'calculator_py',
     target: 'main_py',
     animated: false,
     style: { stroke: '#444' },
+    markerEnd: MarkerType.ArrowClosed,
   },
   {
     id: 'e6',
@@ -238,6 +295,7 @@ const dagEdges = ref<Edge[]>([
     target: 'main_py',
     animated: false,
     style: { stroke: '#444' },
+    markerEnd: MarkerType.ArrowClosed,
   },
   {
     id: 'e7',
@@ -245,6 +303,7 @@ const dagEdges = ref<Edge[]>([
     target: 'reviewer_task',
     animated: false,
     style: { stroke: '#444' },
+    markerEnd: MarkerType.ArrowClosed,
   },
 ])
 
@@ -264,6 +323,7 @@ const updateDagNodeStatus = (
         if (edge.source === nodeId) {
           edge.animated = true
           edge.style = { stroke: '#4fc08d', strokeWidth: '3px' }
+          edge.markerEnd = MarkerType.ArrowClosed
         }
       })
     } else if (status === 'failed') {
@@ -271,6 +331,7 @@ const updateDagNodeStatus = (
         if (edge.source === nodeId) {
           edge.animated = false
           edge.style = { stroke: '#f44336', strokeWidth: '2px' }
+          edge.markerEnd = MarkerType.ArrowClosed
         }
       })
     }
@@ -286,22 +347,10 @@ const resetDag = () => {
   dagEdges.value.forEach((edge) => {
     edge.animated = false
     edge.style = { stroke: '#444', strokeWidth: '1.5px' }
+    edge.markerEnd = MarkerType.ArrowClosed
   })
   updateDagNodeStatus('architect_task', 'in_progress')
 }
-
-// 计算属性：利用 highlight.js 对生成的代码进行实时语法高亮
-const highlightedCode = computed(() => {
-  if (!refactoredCode.value) {
-    return '<span style="color: #6a9955;"># 重构后的最新代码将在此显示...</span>'
-  }
-  try {
-    return hljs.highlight(refactoredCode.value, { language: 'python' }).value
-  } catch (error) {
-    console.error('Highlight error:', error)
-    return refactoredCode.value
-  }
-})
 
 // 自动滚动控制
 const logContainerRef = ref<HTMLDivElement | null>(null)
@@ -404,7 +453,11 @@ const sendStreamRequest = async (payloadText: string, isInitialTurn: boolean) =>
 
               if (token.startsWith('[INFO]')) {
                 const cleanMsg = token.replace('[INFO]', '').trim()
-                agentLogs.value.push({ type: 'info', message: cleanMsg, time: new Date().toLocaleTimeString() })
+                agentLogs.value.push({
+                  type: 'info',
+                  message: cleanMsg,
+                  time: new Date().toLocaleTimeString(),
+                })
 
                 // 阶段 4：从日志中解析重构任务的当前状态并触发 DAG 状态变化
                 if (cleanMsg.includes('Architect')) {
@@ -423,7 +476,11 @@ const sendStreamRequest = async (payloadText: string, isInitialTurn: boolean) =>
                 }
               } else if (token.startsWith('[SUCCESS]')) {
                 const cleanMsg = token.replace('[SUCCESS]', '').trim()
-                agentLogs.value.push({ type: 'success', message: cleanMsg, time: new Date().toLocaleTimeString() })
+                agentLogs.value.push({
+                  type: 'success',
+                  message: cleanMsg,
+                  time: new Date().toLocaleTimeString(),
+                })
 
                 // 阶段 4：工具执行成功，代表对应文件重构完成，点亮绿灯
                 if (cleanMsg.includes('write_code_file')) {
@@ -440,7 +497,7 @@ const sendStreamRequest = async (payloadText: string, isInitialTurn: boolean) =>
                 agentLogs.value.push({
                   type: 'error',
                   message: token.replace('[ERROR]', '').trim(),
-                  time: new Date().toLocaleTimeString()
+                  time: new Date().toLocaleTimeString(),
                 })
               } else if (token.startsWith('[APPROVAL_REQUEST]')) {
                 // 阶段 2：通过 SSE 备用通道接收审批请求，防止 WebSocket 断连导致无响应
@@ -480,7 +537,11 @@ const sendStreamRequest = async (payloadText: string, isInitialTurn: boolean) =>
     }
   } catch (error) {
     console.error('SSE Error:', error)
-    agentLogs.value.push({ type: 'error', message: `错误: ${error}`, time: new Date().toLocaleTimeString() })
+    agentLogs.value.push({
+      type: 'error',
+      message: `错误: ${error}`,
+      time: new Date().toLocaleTimeString(),
+    })
     if (chatMessages.value[agentMessageIndex]) {
       chatMessages.value[agentMessageIndex].text =
         `[重构失败] 无法完成此次对话，请检查后端运行状态。`
@@ -518,10 +579,33 @@ const handleSendChatMessage = () => {
 </script>
 
 <template>
-  <div class="app-container">
+  <div class="app-container" :data-theme="resolvedTheme">
     <header class="header">
-      <h1>🚀 Refactor-Agent (阶段 6)</h1>
-      <p>Multi-Agent 协同分布式架构重构智能体 —— LangGraph & Neo4j 依赖拓扑协同可视化</p>
+      <div class="brand-block">
+        <div class="brand-mark" aria-hidden="true">RA</div>
+        <div class="brand-copy">
+          <div class="brand-title-row">
+            <h1>Refactor Agent</h1>
+            <span class="stage-badge">阶段 6</span>
+          </div>
+          <p>多智能体协同重构工作台 · LangGraph × Neo4j</p>
+        </div>
+      </div>
+
+      <div class="theme-control" role="group" aria-label="界面主题">
+        <button
+          v-for="option in themeOptions"
+          :key="option.value"
+          type="button"
+          :class="['theme-option', { active: themePreference === option.value }]"
+          :aria-pressed="themePreference === option.value"
+          :title="option.label"
+          @click="setThemePreference(option.value)"
+        >
+          <span aria-hidden="true">{{ option.icon }}</span>
+          <span class="theme-option-label">{{ option.label }}</span>
+        </button>
+      </div>
     </header>
 
     <main class="main-content">
@@ -768,19 +852,19 @@ const handleSendChatMessage = () => {
             :class="['tab-btn', activeTab === 'code' ? 'active' : '']"
             @click="activeTab = 'code'"
           >
-            📄 代码视图 (日志与源码)
+            <span aria-hidden="true">⌘</span> 运行日志
           </button>
           <button
             :class="['tab-btn', activeTab === 'dag' ? 'active' : '']"
             @click="activeTab = 'dag'"
           >
-            📋 重构任务 DAG 看板
+            <span aria-hidden="true">◇</span> 任务 DAG
           </button>
           <button
             :class="['tab-btn', activeTab === 'topology' ? 'active' : '']"
             @click="activeTab = 'topology'"
           >
-            🕸️ 架构调用依赖拓扑图谱
+            <span aria-hidden="true">⌘</span> 依赖图谱
           </button>
         </div>
 
@@ -791,7 +875,7 @@ const handleSendChatMessage = () => {
           style="gap: 0.8rem; height: calc(100% - 44px)"
         >
           <!-- 3-1: 运行日志 -->
-          <div class="panel display-half">
+          <div class="panel display-full" style="flex: 1; height: 100%">
             <div class="panel-header">
               <h3>🛠️ Agent 思考与工具调用日志</h3>
             </div>
@@ -803,26 +887,16 @@ const handleSendChatMessage = () => {
               </div>
             </div>
           </div>
-
-          <!-- 3-2: 最新高亮代码 -->
-          <div class="panel display-half">
-            <div class="panel-header">
-              <h3>📄 重构后最新完整代码</h3>
-            </div>
-            <div class="code-viewer-container">
-              <pre
-                class="code-viewer"
-              ><code v-html="highlightedCode" class="hljs language-python"></code></pre>
-            </div>
-          </div>
         </div>
 
         <!-- 3-B: 重构任务 DAG 看板视图 (Vue Flow) -->
-        <div v-show="activeTab === 'dag'" class="tab-content" style="height: calc(100% - 44px)">
+        <div v-if="activeTab === 'dag'" class="tab-content" style="height: calc(100% - 44px)">
           <div class="panel" style="height: 100%">
             <div class="topology-toolbar">
               <span class="title">📋 重构任务 DAG 进度看板</span>
-              <span class="badge-neo4j" style="background-color: #0b533e">任务编排</span>
+              <span class="badge-neo4j" style="background-color: #0b533e; margin-left: 10px"
+                >任务编排</span
+              >
             </div>
             <div style="flex: 1; width: 100%; height: 100%; min-height: 350px">
               <VueFlow
@@ -845,7 +919,7 @@ const handleSendChatMessage = () => {
           style="height: calc(100% - 44px)"
         >
           <div class="panel" style="height: 100%">
-            <TopologyGraph ref="topologyGraphRef" />
+            <TopologyGraph ref="topologyGraphRef" :theme="resolvedTheme" />
           </div>
         </div>
       </div>
@@ -891,9 +965,6 @@ const handleSendChatMessage = () => {
 </template>
 
 <style scoped>
-@import '@vue-flow/core/dist/style.css';
-@import '@vue-flow/core/dist/theme-default.css';
-
 .app-container {
   display: flex;
   flex-direction: column;
@@ -1027,6 +1098,29 @@ const handleSendChatMessage = () => {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+
+/* 拓扑工具栏 */
+.topology-toolbar {
+  display: flex;
+  align-items: center;
+  padding: 0.6rem 0.8rem;
+  background-color: #2d2d2d;
+  border-bottom: 1px solid #3d3d3d;
+}
+
+.topology-toolbar .title {
+  font-size: 0.9rem;
+  font-weight: bold;
+  color: #dcdcaa;
+}
+
+.badge-neo4j {
+  font-size: 10px;
+  background-color: #0b533e;
+  color: #fff;
+  padding: 2px 6px;
+  border-radius: 4px;
 }
 
 /* 控制栏专属 */
@@ -1209,11 +1303,6 @@ const handleSendChatMessage = () => {
   cursor: not-allowed;
 }
 
-/* 展示栏专属 */
-.display-half {
-  flex: 1;
-}
-
 /* 终端风格的日志样式 */
 .log-content {
   flex: 1;
@@ -1262,29 +1351,6 @@ const handleSendChatMessage = () => {
   background: transparent;
   padding: 0;
   font-family: inherit;
-}
-
-/* 代码区域样式 */
-.code-viewer-container {
-  flex: 1;
-  background-color: #1e1e1e;
-  overflow: auto;
-  padding: 0.8rem;
-}
-
-.code-viewer {
-  margin: 0;
-  background: transparent;
-}
-
-.code-viewer code {
-  font-family: 'Fira Code', 'Courier New', Courier, monospace;
-  font-size: 13px;
-  line-height: 1.4;
-  background: transparent;
-  padding: 0;
-  display: block;
-  white-space: pre;
 }
 
 /* Spinner */
@@ -1619,6 +1685,759 @@ const handleSendChatMessage = () => {
   }
   100% {
     transform: translateX(0);
+  }
+}
+</style>
+
+<style scoped>
+/*
+ * 主题令牌是本次界面改造的单一视觉来源：组件只消费语义色，不关心当前是
+ * 浅色还是深色。这与 Agent 工作流的状态解耦思路一致——主题偏好属于输入，
+ * resolvedTheme 才是渲染状态，系统主题变化无需侵入任何业务组件。
+ */
+.app-container[data-theme='light'] {
+  color-scheme: light;
+  --page-bg: #f3f6fb;
+  --surface: #ffffff;
+  --surface-muted: #f7f9fd;
+  --surface-strong: #edf1f8;
+  --header-tint: #eef2ff;
+  --border: #dce3ef;
+  --border-strong: #c9d3e3;
+  --text: #172033;
+  --text-soft: #42526a;
+  --muted: #6b7b93;
+  --subtle: #94a3b8;
+  --primary: #4f46e5;
+  --primary-hover: #4338ca;
+  --primary-soft: #eef2ff;
+  --primary-border: #c7d2fe;
+  --accent: #0f766e;
+  --accent-soft: #ccfbf1;
+  --success: #07835f;
+  --warning: #b45309;
+  --danger: #dc2626;
+  --terminal: #111827;
+  --terminal-text: #cbd5e1;
+  --terminal-muted: #71809a;
+  --shadow: 0 12px 30px rgba(51, 65, 85, 0.08);
+  --shadow-focus: 0 0 0 3px rgba(79, 70, 229, 0.16);
+  --user-bubble: #4f46e5;
+  --agent-bubble: #f1f5f9;
+  --coder-bg: #fffbeb;
+  --coder-text: #92400e;
+  --coder-border: #fcd34d;
+  --reviewer-bg: #faf5ff;
+  --reviewer-text: #7e22ce;
+  --reviewer-border: #d8b4fe;
+  --architect-bg: #eff6ff;
+  --architect-text: #1d4ed8;
+  --architect-border: #93c5fd;
+  --modal-overlay: rgba(15, 23, 42, 0.55);
+  --original-bg: #fff7f7;
+  --original-title: #fee2e2;
+  --modified-bg: #f0fdf7;
+  --modified-title: #d1fae5;
+}
+
+.app-container[data-theme='dark'] {
+  color-scheme: dark;
+  --page-bg: #0b1020;
+  --surface: #151b2b;
+  --surface-muted: #111827;
+  --surface-strong: #1c2639;
+  --header-tint: #171b38;
+  --border: #2b3850;
+  --border-strong: #3b4a66;
+  --text: #e8eef8;
+  --text-soft: #c2cde0;
+  --muted: #93a4bd;
+  --subtle: #66758e;
+  --primary: #818cf8;
+  --primary-hover: #a5b4fc;
+  --primary-soft: #252b52;
+  --primary-border: #444e8f;
+  --accent: #2dd4bf;
+  --accent-soft: #123b3b;
+  --success: #34d399;
+  --warning: #fbbf24;
+  --danger: #fb7185;
+  --terminal: #090e1a;
+  --terminal-text: #c8d4e8;
+  --terminal-muted: #63738d;
+  --shadow: 0 16px 36px rgba(0, 0, 0, 0.24);
+  --shadow-focus: 0 0 0 3px rgba(129, 140, 248, 0.22);
+  --user-bubble: #4f46e5;
+  --agent-bubble: #1d273a;
+  --coder-bg: #332b18;
+  --coder-text: #fcd34d;
+  --coder-border: #8b6b24;
+  --reviewer-bg: #30203b;
+  --reviewer-text: #e9b4ff;
+  --reviewer-border: #754991;
+  --architect-bg: #172d43;
+  --architect-text: #7dd3fc;
+  --architect-border: #32688d;
+  --modal-overlay: rgba(2, 6, 23, 0.8);
+  --original-bg: #27191e;
+  --original-title: #46232c;
+  --modified-bg: #122820;
+  --modified-title: #174333;
+}
+
+:global(html),
+:global(body),
+:global(#app) {
+  width: 100%;
+  min-width: 320px;
+  height: 100%;
+  margin: 0;
+}
+
+:global(body) {
+  overflow: hidden;
+}
+
+:global(*) {
+  box-sizing: border-box;
+}
+
+.app-container {
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at 50% -20%, var(--header-tint) 0, transparent 34%), var(--page-bg);
+  color: var(--text);
+  font-family:
+    Inter,
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    'Segoe UI',
+    sans-serif;
+  transition:
+    background-color 180ms ease,
+    color 180ms ease;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  min-height: 74px;
+  padding: 0.85rem 1.15rem;
+  background: linear-gradient(115deg, var(--surface) 35%, var(--header-tint));
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  box-shadow: 0 1px 0 rgba(15, 23, 42, 0.02);
+}
+
+.brand-block,
+.brand-title-row {
+  display: flex;
+  align-items: center;
+}
+
+.brand-block {
+  min-width: 0;
+  gap: 0.8rem;
+}
+
+.brand-mark {
+  display: grid;
+  flex: 0 0 auto;
+  width: 42px;
+  height: 42px;
+  place-items: center;
+  border-radius: 13px;
+  background: linear-gradient(135deg, var(--primary), var(--accent));
+  color: #ffffff;
+  font-size: 0.8rem;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  box-shadow: 0 8px 20px rgba(79, 70, 229, 0.2);
+}
+
+.brand-copy {
+  min-width: 0;
+}
+
+.brand-title-row {
+  gap: 0.55rem;
+}
+
+.header h1 {
+  margin: 0;
+  color: var(--text);
+  font-size: clamp(1.15rem, 1.6vw, 1.45rem);
+  font-weight: 760;
+  letter-spacing: -0.025em;
+}
+
+.header p {
+  margin: 0.18rem 0 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 0.78rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stage-badge {
+  flex: 0 0 auto;
+  padding: 0.16rem 0.45rem;
+  border: 1px solid var(--primary-border);
+  border-radius: 999px;
+  background: var(--primary-soft);
+  color: var(--primary);
+  font-size: 0.66rem;
+  font-weight: 700;
+}
+
+.theme-control {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 0.2rem;
+  padding: 0.24rem;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--surface-muted);
+}
+
+.theme-option {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.34rem;
+  min-height: 32px;
+  padding: 0.35rem 0.58rem;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.74rem;
+  font-weight: 650;
+  transition: 160ms ease;
+}
+
+.theme-option:hover {
+  color: var(--text);
+}
+
+.theme-option.active {
+  background: var(--surface);
+  color: var(--primary);
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.1);
+}
+
+.theme-option:focus-visible,
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-focus);
+}
+
+.main-content {
+  display: grid;
+  grid-template-columns: minmax(218px, 260px) minmax(480px, 1fr) minmax(285px, 340px);
+  flex: 1;
+  min-height: 0;
+  gap: 0.75rem;
+  padding: 0.75rem;
+  overflow: hidden;
+}
+
+.column,
+.col-control,
+.col-chat,
+.col-display {
+  min-width: 0;
+  min-height: 0;
+}
+
+.column {
+  gap: 0.75rem;
+}
+
+.col-control {
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+.panel {
+  border: 1px solid var(--border);
+  border-radius: 13px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.col-chat .panel {
+  border-color: var(--primary-border);
+  box-shadow:
+    var(--shadow),
+    0 0 0 1px var(--primary-soft);
+}
+
+.panel-header,
+.topology-toolbar {
+  min-height: 43px;
+  padding: 0.68rem 0.8rem;
+  background: var(--surface-muted);
+  border-bottom: 1px solid var(--border);
+}
+
+.panel-header h3,
+.topology-toolbar .title {
+  color: var(--text-soft);
+  font-size: 0.84rem;
+  font-weight: 720;
+  letter-spacing: -0.01em;
+}
+
+.panel-body {
+  padding: 0.72rem;
+}
+
+.settings-card {
+  max-height: 430px;
+}
+
+.code-textarea,
+.form-select,
+.form-input,
+.chat-input {
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface-muted);
+  color: var(--text);
+  transition:
+    border-color 160ms ease,
+    box-shadow 160ms ease,
+    background-color 160ms ease;
+}
+
+.code-textarea {
+  min-height: 78px;
+  padding: 0.7rem;
+  font-size: 12px;
+}
+
+.code-textarea:focus,
+.form-select:focus,
+.form-input:focus,
+.chat-input:focus {
+  border-color: var(--primary);
+  background: var(--surface);
+  box-shadow: var(--shadow-focus);
+}
+
+.code-textarea::placeholder,
+.form-input::placeholder,
+.chat-input::placeholder {
+  color: var(--subtle);
+}
+
+.form-group label,
+.session-info .label {
+  color: var(--muted);
+}
+
+.action-btn,
+.chat-send-btn,
+.modal-btn,
+.retry-btn {
+  border-radius: 8px;
+  font-weight: 700;
+  transition:
+    background-color 160ms ease,
+    transform 160ms ease,
+    opacity 160ms ease;
+}
+
+.initial-btn,
+.chat-send-btn {
+  background: var(--primary);
+  color: #ffffff;
+}
+
+.initial-btn:hover:not(:disabled),
+.chat-send-btn:hover:not(:disabled) {
+  background: var(--primary-hover);
+  transform: translateY(-1px);
+}
+
+.session-card {
+  background: var(--surface);
+}
+
+.session-id {
+  max-width: 100%;
+  overflow: hidden;
+  background: var(--primary-soft);
+  color: var(--primary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.new-session-btn {
+  background: var(--surface-strong);
+  color: var(--text-soft);
+}
+
+.new-session-btn:hover {
+  background: var(--primary-soft);
+  color: var(--primary);
+}
+
+.chat-panel {
+  min-height: 0;
+}
+
+.chat-body {
+  padding: clamp(0.85rem, 1.4vw, 1.25rem);
+  background:
+    linear-gradient(var(--surface-muted), var(--surface-muted)) padding-box,
+    var(--surface-muted);
+  gap: 0.85rem;
+}
+
+.empty-chat {
+  width: min(440px, 82%);
+  margin: auto;
+  padding: 1.2rem;
+  border: 1px dashed var(--border-strong);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--muted);
+  font-style: normal;
+}
+
+.chat-bubble {
+  max-width: min(82%, 760px);
+  padding: 0.78rem 0.9rem;
+  border-radius: 12px;
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.06);
+}
+
+.chat-bubble.user {
+  border-bottom-right-radius: 4px;
+  background: var(--user-bubble);
+}
+
+.chat-bubble.agent {
+  border: 1px solid var(--border);
+  border-bottom-left-radius: 4px;
+  background: var(--agent-bubble);
+  color: var(--text);
+}
+
+.chat-bubble .avatar {
+  color: var(--muted);
+}
+
+.chat-bubble.user .avatar {
+  color: rgba(255, 255, 255, 0.8);
+}
+
+.bubble-text {
+  color: inherit;
+  font-size: 13.5px;
+  line-height: 1.55;
+  word-break: break-word;
+}
+
+.chat-footer {
+  padding: 0.72rem;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.chat-input {
+  min-width: 0;
+  padding: 0.66rem 0.75rem;
+}
+
+.chat-send-btn {
+  padding-inline: 1.1rem;
+}
+
+.chat-send-btn:disabled {
+  background: var(--surface-strong);
+  color: var(--subtle);
+}
+
+.tab-header {
+  height: 43px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.tab-btn {
+  gap: 0.28rem;
+  padding: 0.3rem 0.42rem;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 650;
+}
+
+.tab-btn:hover {
+  background: var(--surface-muted);
+  color: var(--text);
+}
+
+.tab-btn.active {
+  border-bottom: 2px solid var(--primary);
+  background: var(--primary-soft);
+  color: var(--primary);
+}
+
+.badge-neo4j {
+  background: var(--accent-soft) !important;
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.log-content {
+  background: var(--terminal);
+  color: var(--terminal-text);
+}
+
+.empty-logs,
+.log-time {
+  color: var(--terminal-muted);
+}
+
+.log-item {
+  border-bottom-color: rgba(148, 163, 184, 0.14);
+}
+
+.log-item.info {
+  color: #7dd3fc;
+}
+
+.log-item.success {
+  color: #6ee7b7;
+}
+
+.log-item.error {
+  color: #fda4af;
+}
+
+.chat-bubble.coder {
+  border-color: var(--coder-border);
+  background: var(--coder-bg);
+  color: var(--coder-text);
+}
+
+.chat-bubble.reviewer {
+  border-color: var(--reviewer-border);
+  background: var(--reviewer-bg);
+  color: var(--reviewer-text);
+}
+
+.chat-bubble.architect {
+  border-color: var(--architect-border);
+  background: var(--architect-bg);
+  color: var(--architect-text);
+}
+
+.chat-bubble.coder .avatar,
+.chat-bubble.reviewer .avatar,
+.chat-bubble.architect .avatar {
+  color: inherit !important;
+  opacity: 0.82;
+}
+
+.modal-overlay {
+  background: var(--modal-overlay);
+  backdrop-filter: blur(6px);
+}
+
+.modal-container {
+  border-color: var(--primary-border);
+  border-radius: 16px;
+  background: var(--surface);
+  box-shadow: 0 24px 70px rgba(2, 6, 23, 0.36);
+}
+
+.modal-header,
+.modal-footer {
+  border-color: var(--border);
+  background: var(--surface-muted);
+}
+
+.modal-header h3 {
+  color: var(--text);
+}
+
+.modal-tip {
+  color: var(--muted);
+}
+
+.file-badge {
+  border-color: var(--border-strong);
+  background: var(--surface-strong);
+  color: var(--warning);
+}
+
+.diff-panel {
+  border-color: var(--border);
+}
+
+.diff-panel.original {
+  background: var(--original-bg);
+}
+
+.diff-panel.modified {
+  background: var(--modified-bg);
+}
+
+.diff-panel.original .diff-panel-title {
+  background: var(--original-title);
+  color: var(--danger);
+}
+
+.diff-panel.modified .diff-panel-title {
+  background: var(--modified-title);
+  color: var(--success);
+}
+
+.diff-pre {
+  color: var(--text-soft);
+}
+
+:deep(.topology-container),
+:deep(.vue-flow) {
+  background: var(--surface-muted) !important;
+}
+
+:deep(.topology-container .topology-toolbar) {
+  background: var(--surface-muted);
+  border-color: var(--border);
+}
+
+:deep(.topology-container .topology-toolbar .title) {
+  color: var(--text-soft);
+}
+
+:deep(.topology-container .refresh-btn) {
+  background: var(--surface-strong);
+  color: var(--text-soft);
+}
+
+:deep(.topology-container .refresh-btn:hover) {
+  background: var(--primary-soft);
+  color: var(--primary);
+}
+
+:deep(.dag-node-pending) {
+  border-color: var(--border-strong) !important;
+  background: var(--surface-strong) !important;
+  color: var(--muted) !important;
+}
+
+:deep(.dag-node-in_progress) {
+  border-color: var(--warning) !important;
+  background: var(--surface) !important;
+  color: var(--warning) !important;
+}
+
+:deep(.dag-node-completed) {
+  border-color: var(--success) !important;
+  background: var(--accent-soft) !important;
+  color: var(--success) !important;
+}
+
+:deep(.dag-node-failed) {
+  border-color: var(--danger) !important;
+  background: var(--original-bg) !important;
+  color: var(--danger) !important;
+}
+
+@media (max-width: 1080px) {
+  :global(body) {
+    overflow: auto;
+  }
+
+  .app-container {
+    height: auto;
+  }
+
+  .main-content {
+    grid-template-columns: minmax(220px, 250px) minmax(420px, 1fr);
+    overflow: visible;
+  }
+
+  .col-control,
+  .col-chat {
+    min-height: 680px;
+  }
+
+  .col-display {
+    grid-column: 1 / -1;
+    min-height: 430px;
+  }
+}
+
+@media (max-width: 720px) {
+  .header {
+    align-items: flex-start;
+    flex-direction: column;
+    padding: 0.75rem;
+  }
+
+  .theme-control {
+    width: 100%;
+  }
+
+  .theme-option {
+    flex: 1;
+  }
+
+  .main-content {
+    display: flex;
+    flex-direction: column;
+    padding: 0.55rem;
+  }
+
+  .col-control,
+  .col-chat,
+  .col-display {
+    min-height: 620px;
+  }
+
+  .col-display {
+    min-height: 440px;
+  }
+
+  .diff-container {
+    flex-direction: column;
+    overflow-y: auto;
+  }
+
+  .modal-container {
+    width: 94%;
+    height: 90%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
   }
 }
 </style>
