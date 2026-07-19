@@ -1,4 +1,6 @@
-# OpenCode Agent 指南 - Refactor-Agent
+# Codex Agent 指南 - Refactor-Agent
+
+本文件适用于整个仓库。若子目录以后出现更具体的 `AGENTS.md`，以离目标文件最近的规则为准。
 
 ## 1. 软件/硬件系统环境 (System Environment)
 - **操作系统**: Windows 10/11 (`win32`)
@@ -32,13 +34,15 @@
 
 ## 3. 后端开发环境与快捷命令
 所有后端命令必须在 `backend/` 目录下执行，且必须使用虚拟环境（venv）路径：
-- **Python 解释器**: `backend/venv/Scripts/python.exe`
-- **启动服务**: `backend/venv/Scripts/python.exe app.py` (运行在 `http://127.0.0.1:8000`)
+- **Python 解释器**: `venv/Scripts/python.exe`
+- **启动服务**: `venv/Scripts/python.exe app.py` (运行在 `http://127.0.0.1:8000`)
 - **虚拟环境内置脚本** (位于 `backend/venv/Scripts/`，在 Windows 下直接运行)：
-  - 代码格式化/导入排序: `backend/venv/Scripts/format.exe`, `backend/venv/Scripts/sort-imports.exe`
-  - 格式与类型检查: `backend/venv/Scripts/check-format.exe`, `backend/venv/Scripts/check-sort-imports.exe`, `backend/venv/Scripts/check-mypy.exe`, `backend/venv/Scripts/check-lint.exe`
-  - 运行单元测试: `backend/venv/Scripts/test.exe`
-  - 扫描死代码: `backend/venv/Scripts/find-dead-code.exe`
+  - 代码格式化/导入排序: `venv/Scripts/format.exe`, `venv/Scripts/sort-imports.exe`
+  - 格式与类型检查: `venv/Scripts/check-format.exe`, `venv/Scripts/check-sort-imports.exe`, `venv/Scripts/check-mypy.exe`, `venv/Scripts/check-lint.exe`
+  - 运行单元测试: `venv/Scripts/test.exe`
+  - 扫描死代码: `venv/Scripts/find-dead-code.exe`
+
+不要调用系统 Python，也不要在仓库根目录直接运行这些后端脚本；部分脚本依赖 `backend/` 作为当前工作目录。
 
 ---
 
@@ -94,3 +98,14 @@
 ## 8. Git 提交规范
 - 完成**每一个阶段的功能**后立即进行 Git 提交。
 - Git Commit Message 使用**中文**，简洁明了，去除“AI 味”，贴近普通程序员的书写风格。
+- 提交前先检查 `git status --short` 和目标文件的 diff，只暂存本阶段修改；不得覆盖、回滚或顺带提交用户已有改动。
+
+---
+
+## 9. 实施与验证流程
+- 修改前先阅读目标模块及其直接调用方，优先复用现有抽象，避免无关的大范围重写。
+- 使用 PowerShell 5.1 兼容语法；搜索文件和文本时优先使用 `rg --files` 与 `rg`。
+- 验证遵循“最小相关集优先”：后端改动先运行对应检查或测试，再按风险扩大到完整检查；前端改动至少运行 `npm run type-check`，涉及行为时补充相关单元测试。
+- `npm run lint`、`npm run format` 以及后端格式化脚本会改写文件，执行前确认范围，执行后检查 diff，避免混入无关格式变化。
+- Neo4j、Redis 或外部模型服务未启动时，应验证既有降级路径，不得为了让测试通过而移除降级机制。
+- 修改配置、日志或示例时不得新增密钥、令牌或本机凭据；已有敏感配置也不得复制到新文件或输出到日志。
