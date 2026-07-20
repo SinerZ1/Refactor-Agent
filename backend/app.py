@@ -1,16 +1,22 @@
 import asyncio
 import json
-from typing import Dict
+from typing import Dict, Literal
 
 import uvicorn
-from anyio.from_thread import run
-from agent_core import simple_refactor, stream_refactor
-from code_indexer import index_directory
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from graph_indexer import get_topology_data, index_to_neo4j
 from pydantic import BaseModel, ConfigDict, Field
+
+from agent_core import simple_refactor, stream_refactor
+from code_indexer import index_directory
+from graph_indexer import get_topology_data, index_to_neo4j
+from model_catalog import (
+    ModelCatalogError,
+    ModelConnectionConfig,
+    inspect_adc_file,
+    list_available_models,
+)
 
 app = FastAPI(title="Refactor-Agent Backend")
 
@@ -80,6 +86,7 @@ async def send_chatroom_message(thread_id: str, sender: str, content: str):
 
 main_loop = None
 
+
 @app.on_event("startup")
 def startup_event():
     global main_loop
@@ -127,9 +134,47 @@ class RefactorResponse(BaseModel):
     refactored_code: str
 
 
+class ModelConnectionRequest(BaseModel):
+    """连接测试的最小配置，不写日志、不落盘，也不进入 Agent Graph State。"""
+
+    provider: Literal["openai", "gemini_studio", "google_vertex"]
+    api_key: str = ""
+    base_url: str = ""
+    project_id: str = ""
+    location: str = "global"
+    auth_mode: Literal["adc", "api_key"] = "adc"
+
+
+class ModelConnectionResponse(BaseModel):
+    models: list[str]
+    message: str
+
+
 @app.get("/")
 def read_root():
     return {"message": "Welcome to Refactor-Agent API. The service is running!"}
+
+
+@app.get("/api/models/adc-status")
+def get_adc_status():
+    """返回脱敏后的 ADC 探测结果，绝不把本机凭据路径发送到浏览器。"""
+
+    return inspect_adc_file().public_dict()
+
+
+@app.post("/api/models/connect", response_model=ModelConnectionResponse)
+async def connect_model_provider(request: ModelConnectionRequest):
+    """校验供应商配置并归一化返回可用模型目录。"""
+
+    try:
+        models = await list_available_models(
+            ModelConnectionConfig(**request.model_dump())
+        )
+    except ModelCatalogError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ModelConnectionResponse(
+        models=models, message=f"连接成功，共发现 {len(models)} 个模型"
+    )
 
 
 @app.post("/api/refactor", response_model=RefactorResponse)
@@ -137,7 +182,7 @@ def refactor_code(request: RefactorRequest):
     """
     接收代码，调用 Agent 进行简单重构
     """
-    config = {
+    config: dict[str, dict[str, object]] = {
         "configurable": {
             "thread_id": request.thread_id,
         }
@@ -156,7 +201,7 @@ def refactor_code_stream(request: RefactorRequest):
     """
     流式接收重构代码，返回 SSE (Server-Sent Events) 流
     """
-    config = {
+    config: dict[str, dict[str, object]] = {
         "configurable": {
             "thread_id": request.thread_id,
         }
@@ -188,7 +233,7 @@ def refactor_code_stream(request: RefactorRequest):
                 print(
                     f"[app] Graph suspended on interrupt for `{request.thread_id}`. Sending WS message and SSE token."
                 )
-                
+
                 # 方案 A：通过 SSE 确保前端必定收到
                 yield f"data: {json.dumps({'token': '[APPROVAL_REQUEST]' + json.dumps(interrupt_payload)})}\n\n"
 

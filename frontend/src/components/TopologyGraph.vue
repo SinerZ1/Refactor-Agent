@@ -202,11 +202,13 @@ defineExpose({
 <template>
   <div class="topology-container">
     <div class="topology-toolbar">
-      <span class="title">🕸️ 代码架构拓扑图谱</span>
+      <span class="title"
+        ><span class="panel-icon" aria-hidden="true">⌘</span> 代码架构拓扑图谱</span
+      >
       <span v-if="isFallback" class="badge-fallback">AST 降级模式</span>
       <span v-else class="badge-neo4j">Neo4j 图数据</span>
       <button @click="fetchTopology" :disabled="loading" class="refresh-btn">
-        {{ loading ? '刷新中...' : '🔄 刷新图谱' }}
+        {{ loading ? '刷新中...' : '刷新图谱' }}
       </button>
     </div>
 
@@ -241,6 +243,14 @@ defineExpose({
   font-size: 0.9rem;
   font-weight: bold;
   color: #dcdcaa;
+}
+
+.panel-icon {
+  display: inline-grid;
+  width: 1rem;
+  place-items: center;
+  font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+  font-weight: 800;
 }
 
 .badge-fallback {

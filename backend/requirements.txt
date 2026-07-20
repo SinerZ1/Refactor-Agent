@@ -13,6 +13,7 @@ langgraph>=0.2.60         # 核心图引擎: StateGraph/conditional_edge/interru
 langchain-core>=0.3.28    # BaseChatModel/@tool/消息类型等抽象基类
 langchain-openai>=0.2.10  # OpenAI兼容客户端 —— GLM/智谱通过base_url复用此包
 langchain-google-genai>=2.0.5  # Gemini 原生客户端(工具调用格式与OpenAI不同, 需单独适配)
+google-genai>=2.10.0          # 查询 Gemini Studio / Vertex AI 可用模型目录
 langgraph-checkpoint-redis>=0.4.0  # Redis Checkpointer —— 状态持久化(对应Hello-Agents上下文持久化)
 
 # --- 数据层: Redis(pub/sub) + Neo4j(图谱) ---
@@ -23,3 +24,4 @@ neo4j>=5.26.0             # 官方驱动, 存储AST抽取的代码依赖图
 pydantic>=2.9.0           # 数据校验/序列化
 pydantic-settings>=2.6.0  # 从.env读取配置(Neo4j/Redis凭据)
 python-dotenv>=1.0.1      # .env文件加载
+httpx>=0.28.0             # 后端代理模型目录请求，避免浏览器直连泄露密钥

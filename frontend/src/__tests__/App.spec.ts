@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { mount, type VueWrapper } from '@vue/test-utils'
+import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import App from '../App.vue'
 
 class WebSocketStub {
@@ -37,6 +37,17 @@ describe('App', () => {
     systemThemeListener = null
 
     vi.stubGlobal('WebSocket', WebSocketStub)
+    vi.stubGlobal(
+      'fetch',
+      vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(async () =>
+        Promise.resolve(
+          new Response(JSON.stringify({ available: false, message: '未找到有效 ADC 凭据文件' }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          }),
+        ),
+      ),
+    )
     Object.defineProperty(window, 'matchMedia', {
       configurable: true,
       value: vi.fn<(query: string) => MediaQueryList>(() => {
@@ -72,6 +83,12 @@ describe('App', () => {
     expect(wrapper.get('h1').text()).toBe('Refactor Agent')
     expect(wrapper.text()).toContain('多轮交互重构对话')
     expect(wrapper.find('.main-content').exists()).toBe(true)
+    const legacyTitleIcons = ['⚙️', '💾', '💬', '🛠️']
+    expect(
+      wrapper
+        .findAll('.panel-header h3')
+        .every((title) => legacyTitleIcons.every((icon) => !title.text().includes(icon))),
+    ).toBe(true)
   })
 
   it('switches themes and persists the explicit preference', async () => {
@@ -97,5 +114,37 @@ describe('App', () => {
     await wrapper.vm.$nextTick()
 
     expect(wrapper.get('.app-container').attributes('data-theme')).toBe('dark')
+  })
+
+  it('connects to the selected provider and fills the model field', async () => {
+    vi.mocked(fetch).mockImplementation(async (input) => {
+      const url = String(input)
+      if (url.endsWith('/api/models/connect')) {
+        return new Response(
+          JSON.stringify({ models: ['deepseek-v4-pro'], message: '连接成功，共发现 1 个模型' }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        )
+      }
+      return new Response(
+        JSON.stringify({ available: false, message: '未找到有效 ADC 凭据文件' }),
+        {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        },
+      )
+    })
+    wrapper = mountApp()
+
+    const apiKeyInput = wrapper.get('input[placeholder="sk-..."]')
+    await apiKeyInput.setValue('test-key')
+    await wrapper.get('.connect-btn').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('input[list="available-model-options"]').element).toHaveProperty(
+      'value',
+      'deepseek-v4-pro',
+    )
+    expect(wrapper.get('.connection-feedback').text()).toContain('连接成功')
+    expect(localStorage.getItem('refactor_agent_model_config')).not.toContain('test-key')
   })
 })

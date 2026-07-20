@@ -1,3 +1,4 @@
 RefactorAgentPlan.md
 node_modules
 key*
+__pycache__

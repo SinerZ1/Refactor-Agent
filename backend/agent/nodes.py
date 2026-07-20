@@ -4,6 +4,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
+from pydantic import SecretStr
 
 from .prompts import ARCHITECT_PROMPT, DEVELOPER_PROMPT, REVIEWER_PROMPT
 
@@ -31,23 +32,24 @@ def get_llm_from_config(config: RunnableConfig):
     cfg = config.get("configurable", {}) if config else {}
 
     provider = cfg.get("provider", "openai")
-    model_name = cfg.get("model_name") or os.getenv("MODEL_NAME", "gpt-4o-mini")
+    model_name = str(cfg.get("model_name") or os.getenv("MODEL_NAME", "gpt-4o-mini"))
     temperature = cfg.get("temperature", 0.2)
 
     if provider == "openai":
-        api_key = cfg.get("api_key") or os.getenv("OPENAI_API_KEY", "")
-        base_url = cfg.get("base_url") or os.getenv(
-            "OPENAI_BASE_URL", "https://api.openai.com/v1"
+        api_key = str(cfg.get("api_key") or os.getenv("OPENAI_API_KEY", ""))
+        base_url = str(
+            cfg.get("base_url")
+            or os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
         )
         return ChatOpenAI(
-            api_key=api_key,
+            api_key=SecretStr(api_key),
             base_url=base_url,
             model=model_name,
             temperature=temperature,
         )
 
     elif provider == "gemini_studio":
-        api_key = (
+        api_key = str(
             cfg.get("api_key")
             or os.getenv("GEMINI_API_KEY")
             or os.getenv("GOOGLE_API_KEY", "")
@@ -85,12 +87,13 @@ def get_llm_from_config(config: RunnableConfig):
                 temperature=temperature,
             )
         else:  # "api_key"
-            api_key = cfg.get("api_key") or os.getenv("VERTEX_API_KEY", "")
+            api_key = str(cfg.get("api_key") or os.getenv("VERTEX_API_KEY", ""))
+            # Vertex AI 的 API Key 属于 Express Mode；Google Gen AI 客户端明确要求
+            # API Key 与 project/location 互斥。这里与模型目录连接测试保持同一鉴权语义，
+            # 避免 UI 显示连接成功、真正执行 Agent 时却因参数冲突失败。
             return ChatGoogleGenerativeAI(
                 model=model,
                 google_api_key=api_key,
-                project=project,
-                location=location,
                 vertexai=True,
                 temperature=temperature,
             )
@@ -111,7 +114,7 @@ def get_llm_from_config(config: RunnableConfig):
             api_key = os.getenv("OPENAI_API_KEY", "")
             base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
             return ChatOpenAI(
-                api_key=api_key,
+                api_key=SecretStr(api_key),
                 base_url=base_url,
                 model=model_name,
                 temperature=temperature,

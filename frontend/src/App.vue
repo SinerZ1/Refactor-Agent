@@ -57,17 +57,91 @@ const chatMessages = ref<
 >([])
 
 // 阶段 1：多模型与服务提供商动态配置状态
-const modelConfig = ref({
+type ModelProvider = 'openai' | 'gemini_studio' | 'google_vertex'
+type VertexAuthMode = 'adc' | 'api_key'
+
+interface ModelConfig {
+  provider: ModelProvider
+  base_url: string
+  model_name: string
+  vertex_project_id: string
+  vertex_location: string
+  vertex_model_name: string
+  vertex_auth_mode: VertexAuthMode
+}
+
+interface ConnectionFeedback {
+  type: 'idle' | 'success' | 'error'
+  message: string
+}
+
+interface AdcStatus {
+  available: boolean
+  message: string
+  source?: string | null
+  project_id?: string | null
+  credential_type?: string | null
+}
+
+const modelConfig = ref<ModelConfig>({
   provider: 'openai',
-  api_key: '',
-  base_url: 'https://api.siliconflow.cn/v1',
-  model_name: 'deepseek-ai/DeepSeek-V4-Flash',
-  vertex_project_id: 'project-c756c615-f8ff-41ea-8a3',
-  vertex_location: 'us-central1',
+  base_url: 'https://api.deepseek.com',
+  model_name: 'deepseek-v4-flash',
+  vertex_project_id: '',
+  vertex_location: 'global',
   vertex_model_name: 'gemini-3.5-flash',
-  vertex_auth_mode: 'adc', // 'adc' | 'api_key'
-  vertex_adc_path:
-    'C:\\Users\\10900\\AppData\\Roaming\\gcloud\\application_default_credentials.json',
+  vertex_auth_mode: 'adc',
+})
+
+// API Key 按供应商隔离且仅保存在内存中，避免切换供应商时把一个平台的密钥误发给另一个平台。
+const providerApiKeys = ref<Record<ModelProvider, string>>({
+  openai: '',
+  gemini_studio: '',
+  google_vertex: '',
+})
+const modelOptions = ref<Record<ModelProvider, string[]>>({
+  openai: [],
+  gemini_studio: [],
+  google_vertex: [],
+})
+const isConnectingProvider = ref(false)
+const connectionFeedback = ref<ConnectionFeedback>({ type: 'idle', message: '' })
+const adcStatus = ref<AdcStatus>({ available: false, message: '正在检查 ADC…' })
+
+const currentApiKey = computed({
+  get: () => providerApiKeys.value[modelConfig.value.provider],
+  set: (value: string) => {
+    providerApiKeys.value[modelConfig.value.provider] = value
+  },
+})
+
+const activeModelName = computed({
+  get: () =>
+    modelConfig.value.provider === 'google_vertex'
+      ? modelConfig.value.vertex_model_name
+      : modelConfig.value.model_name,
+  set: (value: string) => {
+    if (modelConfig.value.provider === 'google_vertex') {
+      modelConfig.value.vertex_model_name = value
+    } else {
+      modelConfig.value.model_name = value
+    }
+    saveConfig()
+  },
+})
+
+const activeModelOptions = computed(() => modelOptions.value[modelConfig.value.provider])
+const canConnectProvider = computed(() => {
+  if (modelConfig.value.provider === 'openai') {
+    return Boolean(currentApiKey.value.trim() && modelConfig.value.base_url.trim())
+  }
+  if (modelConfig.value.provider === 'gemini_studio') {
+    return Boolean(currentApiKey.value.trim())
+  }
+  if (modelConfig.value.vertex_auth_mode === 'api_key') {
+    return Boolean(currentApiKey.value.trim())
+  }
+  return adcStatus.value.available
 })
 
 // 从 LocalStorage 加载本地模型配置
@@ -75,7 +149,10 @@ const loadSavedConfig = () => {
   const saved = localStorage.getItem('refactor_agent_model_config')
   if (saved) {
     try {
-      const parsed = JSON.parse(saved)
+      const parsed = JSON.parse(saved) as Partial<ModelConfig> & Record<string, unknown>
+      // 兼容并清理旧版本曾写入 LocalStorage 的 API Key 与本机 ADC 路径。
+      delete parsed.api_key
+      delete parsed.vertex_adc_path
       modelConfig.value = { ...modelConfig.value, ...parsed }
     } catch (e) {
       console.error('加载本地模型配置失败:', e)
@@ -90,6 +167,78 @@ const saveConfig = () => {
 
 // 页面加载时载入配置
 loadSavedConfig()
+
+const loadAdcStatus = async () => {
+  try {
+    const response = await fetch('http://127.0.0.1:8000/api/models/adc-status')
+    if (!response.ok) throw new Error(`HTTP ${response.status}`)
+    adcStatus.value = (await response.json()) as AdcStatus
+    if (!modelConfig.value.vertex_project_id && adcStatus.value.project_id) {
+      modelConfig.value.vertex_project_id = adcStatus.value.project_id
+      saveConfig()
+    }
+  } catch {
+    adcStatus.value = { available: false, message: '无法检查 ADC，请确认后端已启动' }
+  }
+}
+
+const handleProviderChange = () => {
+  connectionFeedback.value = { type: 'idle', message: '' }
+  saveConfig()
+  if (modelConfig.value.provider === 'google_vertex') {
+    loadAdcStatus()
+  }
+}
+
+const getRuntimeModelConfig = () => ({
+  ...modelConfig.value,
+  api_key: currentApiKey.value,
+})
+
+const connectModelProvider = async () => {
+  isConnectingProvider.value = true
+  connectionFeedback.value = { type: 'idle', message: '' }
+
+  try {
+    const response = await fetch('http://127.0.0.1:8000/api/models/connect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        provider: modelConfig.value.provider,
+        api_key: currentApiKey.value,
+        base_url: modelConfig.value.base_url,
+        project_id: modelConfig.value.vertex_project_id,
+        location: modelConfig.value.vertex_location,
+        auth_mode: modelConfig.value.vertex_auth_mode,
+      }),
+    })
+    const payload = (await response.json()) as {
+      models?: string[]
+      message?: string
+      detail?: string
+    }
+    if (!response.ok) {
+      throw new Error(payload.detail || `连接失败（HTTP ${response.status}）`)
+    }
+
+    const models = payload.models ?? []
+    modelOptions.value[modelConfig.value.provider] = models
+    if (models.length > 0 && !models.includes(activeModelName.value)) {
+      activeModelName.value = models[0]!
+    }
+    connectionFeedback.value = {
+      type: 'success',
+      message: payload.message || `连接成功，共发现 ${models.length} 个模型`,
+    }
+  } catch (error) {
+    connectionFeedback.value = {
+      type: 'error',
+      message: error instanceof Error ? error.message : '连接失败，请检查配置',
+    }
+  } finally {
+    isConnectingProvider.value = false
+  }
+}
 
 // 阶段 2：WebSocket 双向全双工 & 人机协作审批 (HITL)
 const socket = ref<WebSocket | null>(null)
@@ -184,6 +333,7 @@ onMounted(() => {
     systemThemeQuery.addEventListener('change', syncSystemTheme)
   }
   initWebSocket()
+  loadAdcStatus()
 })
 
 onUnmounted(() => {
@@ -418,7 +568,7 @@ const sendStreamRequest = async (payloadText: string, isInitialTurn: boolean) =>
       body: JSON.stringify({
         code: payloadText,
         thread_id: threadId.value,
-        model_config: modelConfig.value,
+        model_config: getRuntimeModelConfig(),
       }),
     })
 
@@ -613,7 +763,7 @@ const handleSendChatMessage = () => {
       <div class="column col-control">
         <div class="panel">
           <div class="panel-header">
-            <h3>⚙️ 初始代码/本地文件</h3>
+            <h3><span class="panel-icon" aria-hidden="true">⌘</span> 初始代码/本地文件</h3>
           </div>
           <div class="panel-body flex-column">
             <textarea
@@ -636,13 +786,17 @@ const handleSendChatMessage = () => {
         <!-- 阶段 1：智能体模型配置卡片 -->
         <div class="panel settings-card">
           <div class="panel-header">
-            <h3>⚙️ 智能体模型配置</h3>
+            <h3><span class="panel-icon" aria-hidden="true">⌘</span> 智能体模型配置</h3>
           </div>
           <div class="panel-body flex-column" style="gap: 0.8rem; overflow-y: auto">
             <div class="form-group">
-              <label>服务提供商 (Provider):</label>
-              <select v-model="modelConfig.provider" @change="saveConfig" class="form-select">
-                <option value="openai">OpenAI 兼容 / 智谱 / 国产模型</option>
+              <label>Provider:</label>
+              <select
+                v-model="modelConfig.provider"
+                @change="handleProviderChange"
+                class="form-select"
+              >
+                <option value="openai">OpenAI API Compatible</option>
                 <option value="gemini_studio">Gemini AI Studio</option>
                 <option value="google_vertex">Google Vertex AI</option>
               </select>
@@ -653,10 +807,10 @@ const handleSendChatMessage = () => {
               <div class="form-group">
                 <label>API Key:</label>
                 <input
-                  v-model="modelConfig.api_key"
-                  @input="saveConfig"
+                  v-model="currentApiKey"
                   type="password"
-                  placeholder="请输入 API Key"
+                  placeholder="sk-..."
+                  autocomplete="off"
                   class="form-input"
                 />
               </div>
@@ -666,17 +820,17 @@ const handleSendChatMessage = () => {
                   v-model="modelConfig.base_url"
                   @input="saveConfig"
                   type="text"
-                  placeholder="https://api.openai.com/v1"
+                  placeholder="https://api.deepseek.com"
                   class="form-input"
                 />
               </div>
               <div class="form-group" style="margin-top: 0.4rem">
-                <label>模型名称 (Model):</label>
+                <label>Model:</label>
                 <input
-                  v-model="modelConfig.model_name"
-                  @input="saveConfig"
+                  v-model="activeModelName"
                   type="text"
-                  placeholder="gpt-4o-mini"
+                  list="available-model-options"
+                  placeholder="deepseek-v4-flash"
                   class="form-input"
                 />
               </div>
@@ -685,22 +839,22 @@ const handleSendChatMessage = () => {
             <!-- Gemini AI Studio 配置 -->
             <div v-if="modelConfig.provider === 'gemini_studio'" class="provider-sub-form">
               <div class="form-group">
-                <label>Gemini API Key:</label>
+                <label>API Key:</label>
                 <input
-                  v-model="modelConfig.api_key"
-                  @input="saveConfig"
+                  v-model="currentApiKey"
                   type="password"
-                  placeholder="请输入 Gemini API Key"
+                  placeholder="AIza..."
+                  autocomplete="off"
                   class="form-input"
                 />
               </div>
               <div class="form-group" style="margin-top: 0.4rem">
-                <label>模型名称 (Model):</label>
+                <label>Model:</label>
                 <input
-                  v-model="modelConfig.model_name"
-                  @input="saveConfig"
+                  v-model="activeModelName"
                   type="text"
-                  placeholder="gemini-1.5-flash"
+                  list="available-model-options"
+                  placeholder="gemini-3.5-flash"
                   class="form-input"
                 />
               </div>
@@ -713,66 +867,91 @@ const handleSendChatMessage = () => {
               style="display: flex; flex-direction: column; gap: 0.6rem"
             >
               <div class="form-group">
-                <label>Project ID (项目ID):</label>
+                <label>Project ID:</label>
                 <input
                   v-model="modelConfig.vertex_project_id"
                   @input="saveConfig"
-                  type="text"
-                  placeholder="GCP 项目 ID"
+                  type="password"
+                  placeholder="Google Cloud project ID"
+                  autocomplete="off"
                   class="form-input"
                 />
               </div>
               <div class="form-group">
-                <label>Location (可用区):</label>
+                <label>Location:</label>
                 <input
                   v-model="modelConfig.vertex_location"
                   @input="saveConfig"
                   type="text"
-                  placeholder="us-central1"
+                  placeholder="global"
                   class="form-input"
                 />
               </div>
               <div class="form-group">
-                <label>Vertex 模型名称:</label>
+                <label>Model:</label>
                 <input
-                  v-model="modelConfig.vertex_model_name"
-                  @input="saveConfig"
+                  v-model="activeModelName"
                   type="text"
+                  list="available-model-options"
                   placeholder="gemini-3.5-flash"
                   class="form-input"
                 />
               </div>
               <div class="form-group">
-                <label>验证方式 (Auth Mode):</label>
+                <label>Auth Mode:</label>
                 <select
                   v-model="modelConfig.vertex_auth_mode"
-                  @change="saveConfig"
+                  @change="handleProviderChange"
                   class="form-select"
                 >
-                  <option value="adc">本地 ADC 凭证路径 (推荐)</option>
-                  <option value="api_key">Vertex API KEY 验证</option>
+                  <option value="adc">Application Default Credentials (ADC)</option>
+                  <option value="api_key">API Key</option>
                 </select>
               </div>
-              <div v-if="modelConfig.vertex_auth_mode === 'adc'" class="form-group">
-                <label>ADC JSON 凭据路径:</label>
-                <input
-                  v-model="modelConfig.vertex_adc_path"
-                  @input="saveConfig"
-                  type="text"
-                  placeholder="本地 JSON 凭据绝对路径"
-                  class="form-input"
-                />
+              <div v-if="modelConfig.vertex_auth_mode === 'adc'" class="adc-status-card">
+                <span :class="['status-dot', adcStatus.available ? 'success' : 'error']"></span>
+                <div>
+                  <strong>ADC</strong>
+                  <p>{{ adcStatus.message }}</p>
+                  <small v-if="adcStatus.available && adcStatus.credential_type">
+                    {{ adcStatus.credential_type }} · {{ adcStatus.source || 'default' }}
+                  </small>
+                </div>
+                <button type="button" class="adc-refresh-btn" @click="loadAdcStatus">检查</button>
               </div>
               <div v-if="modelConfig.vertex_auth_mode === 'api_key'" class="form-group">
-                <label>Vertex API Key:</label>
+                <label>API Key:</label>
                 <input
-                  v-model="modelConfig.api_key"
-                  @input="saveConfig"
+                  v-model="currentApiKey"
                   type="password"
-                  placeholder="请输入 API Key"
+                  placeholder="Google Cloud API key"
+                  autocomplete="off"
                   class="form-input"
                 />
               </div>
+            </div>
+
+            <datalist id="available-model-options">
+              <option v-for="model in activeModelOptions" :key="model" :value="model"></option>
+            </datalist>
+
+            <div class="connection-actions">
+              <button
+                type="button"
+                class="connect-btn"
+                :disabled="isConnectingProvider || !canConnectProvider"
+                @click="connectModelProvider"
+              >
+                <span v-if="isConnectingProvider" class="spinner"></span>
+                {{ isConnectingProvider ? '连接中…' : '连接' }}
+              </button>
+              <p
+                v-if="connectionFeedback.message"
+                :class="['connection-feedback', connectionFeedback.type]"
+                role="status"
+              >
+                {{ connectionFeedback.message }}
+              </p>
             </div>
           </div>
         </div>
@@ -780,7 +959,7 @@ const handleSendChatMessage = () => {
         <!-- 阶段 4 记忆卡片 -->
         <div class="panel session-card">
           <div class="panel-header">
-            <h3>💾 会话记忆控制</h3>
+            <h3><span class="panel-icon" aria-hidden="true">◇</span> 会话记忆控制</h3>
           </div>
           <div class="panel-body">
             <div class="session-info">
@@ -798,7 +977,7 @@ const handleSendChatMessage = () => {
       <div class="column col-chat">
         <div class="panel chat-panel">
           <div class="panel-header">
-            <h3>💬 多轮交互重构对话</h3>
+            <h3><span class="panel-icon" aria-hidden="true">⌘</span> 多轮交互重构对话</h3>
           </div>
 
           <div ref="chatContainerRef" class="chat-body">
@@ -877,7 +1056,7 @@ const handleSendChatMessage = () => {
           <!-- 3-1: 运行日志 -->
           <div class="panel display-full" style="flex: 1; height: 100%">
             <div class="panel-header">
-              <h3>🛠️ Agent 思考与工具调用日志</h3>
+              <h3><span class="panel-icon" aria-hidden="true">⌘</span> Agent 思考与工具调用日志</h3>
             </div>
             <div ref="logContainerRef" class="log-content">
               <div v-if="agentLogs.length === 0" class="empty-logs">等待 Agent 执行操作...</div>
@@ -893,7 +1072,9 @@ const handleSendChatMessage = () => {
         <div v-if="activeTab === 'dag'" class="tab-content" style="height: calc(100% - 44px)">
           <div class="panel" style="height: 100%">
             <div class="topology-toolbar">
-              <span class="title">📋 重构任务 DAG 进度看板</span>
+              <span class="title"
+                ><span class="panel-icon" aria-hidden="true">◇</span> 重构任务 DAG 进度看板</span
+              >
               <span class="badge-neo4j" style="background-color: #0b533e; margin-left: 10px"
                 >任务编排</span
               >
@@ -929,7 +1110,9 @@ const handleSendChatMessage = () => {
     <div v-if="isApprovalModalOpen && approvalPayload" class="modal-overlay">
       <div class="modal-container">
         <div class="modal-header">
-          <h3>🛡️ 人机协作审批 (HITL) —— 代码修改确认</h3>
+          <h3>
+            <span class="panel-icon" aria-hidden="true">◇</span> 人机协作审批 (HITL) —— 代码修改确认
+          </h3>
           <span class="file-badge">{{ approvalPayload.file_path }}</span>
         </div>
 
@@ -1425,6 +1608,126 @@ const handleSendChatMessage = () => {
   gap: 0.5rem;
 }
 
+.connection-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding-top: 0.15rem;
+}
+
+.connect-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 38px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--primary);
+  color: #fff;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.84rem;
+  font-weight: 720;
+  transition:
+    background-color 160ms ease,
+    transform 160ms ease,
+    opacity 160ms ease;
+}
+
+.connect-btn:hover:not(:disabled) {
+  background: var(--primary-hover);
+  transform: translateY(-1px);
+}
+
+.connect-btn:disabled {
+  background: var(--surface-strong);
+  color: var(--subtle);
+  cursor: not-allowed;
+}
+
+.connection-feedback {
+  margin: 0;
+  padding: 0.48rem 0.58rem;
+  border-radius: 7px;
+  font-size: 0.72rem;
+  line-height: 1.45;
+}
+
+.connection-feedback.success {
+  background: var(--accent-soft);
+  color: var(--success);
+}
+
+.connection-feedback.error {
+  background: var(--original-bg);
+  color: var(--danger);
+}
+
+.adc-status-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.55rem;
+  padding: 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-muted);
+  color: var(--text-soft);
+}
+
+.adc-status-card strong {
+  font-size: 0.75rem;
+}
+
+.adc-status-card p {
+  margin: 0.12rem 0 0;
+  color: var(--muted);
+  font-size: 0.7rem;
+  line-height: 1.4;
+}
+
+.adc-status-card small {
+  display: block;
+  margin-top: 0.16rem;
+  color: var(--subtle);
+  font-size: 0.64rem;
+}
+
+.adc-refresh-btn {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 0.2rem 0.42rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--primary);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.64rem;
+  font-weight: 700;
+}
+
+.adc-refresh-btn:hover {
+  background: var(--primary-soft);
+}
+
+.status-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  margin-top: 0.3rem;
+  border-radius: 50%;
+  background: var(--subtle);
+  box-shadow: 0 0 0 3px var(--surface-strong);
+}
+
+.status-dot.success {
+  background: var(--success);
+}
+
+.status-dot.error {
+  background: var(--danger);
+}
+
 /* 阶段 2：HITL 审批弹窗样式 */
 .modal-overlay {
   position: fixed;
@@ -1717,9 +2020,12 @@ const handleSendChatMessage = () => {
   --success: #07835f;
   --warning: #b45309;
   --danger: #dc2626;
-  --terminal: #111827;
-  --terminal-text: #cbd5e1;
-  --terminal-muted: #71809a;
+  --terminal: #f8fafc;
+  --terminal-text: #334155;
+  --terminal-muted: #94a3b8;
+  --log-info: #0369a1;
+  --log-success: #047857;
+  --log-error: #be123c;
   --shadow: 0 12px 30px rgba(51, 65, 85, 0.08);
   --shadow-focus: 0 0 0 3px rgba(79, 70, 229, 0.16);
   --user-bubble: #4f46e5;
@@ -1765,6 +2071,9 @@ const handleSendChatMessage = () => {
   --terminal: #090e1a;
   --terminal-text: #c8d4e8;
   --terminal-muted: #63738d;
+  --log-info: #7dd3fc;
+  --log-success: #6ee7b7;
+  --log-error: #fda4af;
   --shadow: 0 16px 36px rgba(0, 0, 0, 0.24);
   --shadow-focus: 0 0 0 3px rgba(129, 140, 248, 0.22);
   --user-bubble: #4f46e5;
@@ -2001,12 +2310,21 @@ select:focus-visible {
   letter-spacing: -0.01em;
 }
 
+.panel-icon {
+  display: inline-grid;
+  width: 1rem;
+  place-items: center;
+  color: var(--primary);
+  font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+  font-weight: 800;
+}
+
 .panel-body {
   padding: 0.72rem;
 }
 
 .settings-card {
-  max-height: 430px;
+  max-height: 500px;
 }
 
 .code-textarea,
@@ -2221,15 +2539,15 @@ select:focus-visible {
 }
 
 .log-item.info {
-  color: #7dd3fc;
+  color: var(--log-info);
 }
 
 .log-item.success {
-  color: #6ee7b7;
+  color: var(--log-success);
 }
 
 .log-item.error {
-  color: #fda4af;
+  color: var(--log-error);
 }
 
 .chat-bubble.coder {
