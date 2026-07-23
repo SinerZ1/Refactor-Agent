@@ -13,7 +13,7 @@
 - **Neo4j 数据库**: Neo4j Desktop 2。
   - 本地实例名称: `Cyber-Refactor-Agent-Database` (Version: 2026.05.0)
   - 连接 URI: `neo4j://127.0.0.1:7687` (或 `bolt://127.0.0.1:7687`)
-  - 认证信息: Username=`neo4j`，Password=`Siner5920`
+  - 认证信息必须通过 `backend/.env` 中的 `NEO4J_USER` 与 `NEO4J_PASSWORD` 提供；禁止在受版本控制的文件中记录明文口令。
 
 ---
 
