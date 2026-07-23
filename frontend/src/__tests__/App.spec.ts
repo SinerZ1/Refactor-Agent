@@ -247,4 +247,47 @@ describe('App', () => {
       approved: true,
     })
   })
+
+  it('aborts the previous stream before creating a new session', async () => {
+    let sessionNumber = 0
+    let streamSignal: AbortSignal | null = null
+    vi.mocked(fetch).mockImplementation(async (input, init) => {
+      const url = String(input)
+      if (url.endsWith('/api/sessions')) {
+        sessionNumber += 1
+        return new Response(
+          JSON.stringify({
+            thread_id: `session_${sessionNumber}`,
+            session_token: `token_${sessionNumber}`,
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        )
+      }
+      if (url.endsWith('/api/refactor/stream')) {
+        streamSignal = init?.signal ?? null
+        return await new Promise<Response>((_resolve, reject) => {
+          streamSignal?.addEventListener('abort', () => {
+            reject(new DOMException('aborted', 'AbortError'))
+          })
+        })
+      }
+      return new Response(
+        JSON.stringify({ available: false, message: '未找到有效 ADC 凭据文件' }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      )
+    })
+    wrapper = mountApp()
+    await flushPromises()
+
+    await wrapper.get('.initial-btn').trigger('click')
+    await flushPromises()
+    expect(streamSignal).not.toBeNull()
+
+    await wrapper.get('.new-session-btn').trigger('click')
+    await flushPromises()
+
+    expect((streamSignal as AbortSignal | null)?.aborted).toBe(true)
+    expect(wrapper.get('.session-id').text()).toBe('session_2')
+    expect(wrapper.findAll('.log-item.error')).toHaveLength(0)
+  })
 })

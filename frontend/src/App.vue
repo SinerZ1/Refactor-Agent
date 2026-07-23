@@ -52,6 +52,8 @@ watch(themePreference, (theme) => {
 const sourceCode = ref('CodeSmells/main.py') // 默认要重构的测试文件路径
 const refactoredCode = ref('')
 const isRefactoring = ref(false)
+let streamAbortController: AbortController | null = null
+let streamGeneration = 0
 const agentLogs = ref<{ type: 'info' | 'success' | 'error'; message: string; time: string }[]>([])
 
 // 阶段 4：会话与多轮对话记忆状态
@@ -276,6 +278,13 @@ const ensureBackendSession = async () => {
   }
 }
 
+const cancelActiveStream = () => {
+  streamGeneration += 1
+  streamAbortController?.abort()
+  streamAbortController = null
+  isRefactoring.value = false
+}
+
 // 初始化 WebSocket 连接并监听
 const initWebSocket = () => {
   if (!threadId.value || !sessionToken.value) return
@@ -416,6 +425,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   systemThemeQuery?.removeEventListener('change', syncSystemTheme)
+  cancelActiveStream()
   socket.value?.close()
   socket.value = null
 })
@@ -612,6 +622,7 @@ watch(
 
 // 重置会话 (New Session)
 const handleNewSession = async () => {
+  cancelActiveStream()
   socket.value?.close()
   threadId.value = ''
   sessionToken.value = ''
@@ -643,6 +654,13 @@ const sendStreamRequest = async (payloadText: string, isInitialTurn: boolean) =>
     })
     return
   }
+
+  streamAbortController?.abort()
+  const controller = new AbortController()
+  streamAbortController = controller
+  const generation = ++streamGeneration
+  const requestThreadId = threadId.value
+  const requestSessionToken = sessionToken.value
   isRefactoring.value = true
   if (isInitialTurn) {
     refactoredCode.value = ''
@@ -663,13 +681,14 @@ const sendStreamRequest = async (payloadText: string, isInitialTurn: boolean) =>
   try {
     const response = await fetch(`${API_BASE_URL}/api/refactor/stream`, {
       method: 'POST',
+      signal: controller.signal,
       headers: {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
         code: payloadText,
-        thread_id: threadId.value,
-        session_token: sessionToken.value,
+        thread_id: requestThreadId,
+        session_token: requestSessionToken,
         model_config: getRuntimeModelConfig(),
       }),
     })
@@ -687,6 +706,10 @@ const sendStreamRequest = async (payloadText: string, isInitialTurn: boolean) =>
     let buffer = ''
     while (true) {
       const { value, done } = await reader.read()
+      if (generation !== streamGeneration) {
+        await reader.cancel()
+        return
+      }
       if (done) {
         break
       }
@@ -788,6 +811,13 @@ const sendStreamRequest = async (payloadText: string, isInitialTurn: boolean) =>
       }
     }
   } catch (error) {
+    if (
+      generation !== streamGeneration ||
+      controller.signal.aborted ||
+      (error instanceof DOMException && error.name === 'AbortError')
+    ) {
+      return
+    }
     console.error('SSE Error:', error)
     agentLogs.value.push({
       type: 'error',
@@ -799,6 +829,8 @@ const sendStreamRequest = async (payloadText: string, isInitialTurn: boolean) =>
         `[重构失败] 无法完成此次对话，请检查后端运行状态。`
     }
   } finally {
+    if (generation !== streamGeneration) return
+    streamAbortController = null
     isRefactoring.value = false
     // 流程结束后，自动刷新图谱以展示最新架构关系
     nextTick(() => {
