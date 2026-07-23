@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import * as echarts from 'echarts'
+import { API_BASE_URL } from '../api'
 
 const props = defineProps<{
   theme: 'light' | 'dark'
@@ -36,7 +37,7 @@ const fetchTopology = async () => {
   loading.value = true
   errorMsg.value = ''
   try {
-    const res = await fetch('http://127.0.0.1:8000/api/graph/topology')
+    const res = await fetch(`${API_BASE_URL}/api/graph/topology`)
     if (!res.ok) throw new Error('无法连接后端 API')
     const data = await res.json()
     isFallback.value = data.fallback || false

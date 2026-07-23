@@ -5,11 +5,7 @@ import '@vue-flow/core/dist/theme-default.css'
 import { VueFlow, MarkerType } from '@vue-flow/core'
 import type { Node, Edge } from '@vue-flow/core'
 import TopologyGraph from './components/TopologyGraph.vue'
-
-const configuredApiBase = import.meta.env.VITE_API_BASE_URL?.trim()
-const API_BASE_URL =
-  configuredApiBase ||
-  (window.location.port === '5173' ? 'http://127.0.0.1:8000' : window.location.origin)
+import { API_BASE_URL } from './api'
 
 type ThemePreference = 'light' | 'dark' | 'system'
 

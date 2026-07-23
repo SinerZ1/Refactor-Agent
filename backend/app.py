@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 from typing import Literal
+from urllib.parse import urlsplit
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -43,6 +44,21 @@ ALLOWED_ORIGINS = {
 }
 
 
+def is_websocket_origin_allowed(origin: str | None, host: str) -> bool:
+    """允许配置白名单或动态端口下的同源回环连接。"""
+
+    if not origin:
+        return True
+    if origin in ALLOWED_ORIGINS:
+        return True
+    parsed = urlsplit(origin)
+    return (
+        parsed.scheme in {"http", "https"}
+        and parsed.netloc == host
+        and parsed.hostname in {"127.0.0.1", "localhost", "::1"}
+    )
+
+
 class ConnectionManager:
     def __init__(self):
         self.active_connections: dict[str, WebSocket] = {}
@@ -80,7 +96,7 @@ manager = ConnectionManager()
 async def websocket_endpoint(websocket: WebSocket, thread_id: str):
     origin = websocket.headers.get("origin")
     session_token = websocket.query_params.get("token", "")
-    if origin and origin not in ALLOWED_ORIGINS:
+    if not is_websocket_origin_allowed(origin, websocket.headers.get("host", "")):
         await websocket.close(code=1008, reason="Origin 不在允许列表")
         return
     try:
@@ -264,9 +280,14 @@ def authorize_refactor_request(request: RefactorRequest) -> str:
     return session_token
 
 
-@app.get("/")
+@app.get("/api")
 def read_root():
     return {"message": "Welcome to Refactor-Agent API. The service is running!"}
+
+
+@app.get("/api/health")
+def health_check():
+    return {"status": "ok"}
 
 
 @app.post("/api/sessions", response_model=SessionResponse)
@@ -443,4 +464,9 @@ else:
 
 
 if __name__ == "__main__":
-    uvicorn.run("app:app", host="127.0.0.1", port=8000, reload=True)
+    uvicorn.run(
+        "app:app",
+        host=os.getenv("BACKEND_HOST", "127.0.0.1"),
+        port=int(os.getenv("BACKEND_PORT", "8000")),
+        reload=os.getenv("BACKEND_RELOAD", "true").lower() == "true",
+    )
