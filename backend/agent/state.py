@@ -1,4 +1,4 @@
-from typing import Annotated, TypedDict
+from typing import Annotated, Literal, NotRequired, TypedDict
 
 from langgraph.graph.message import add_messages
 
@@ -14,3 +14,5 @@ from langgraph.graph.message import add_messages
 class State(TypedDict):
     messages: Annotated[list, add_messages]  # 合并/追加消息列表
     retry_count: int  # 记录 Reviewer 的重试次数
+    review_protocol_errors: NotRequired[int]
+    review_status: NotRequired[Literal["running", "success", "failed"]]

@@ -17,7 +17,13 @@ def simple_refactor(code: str, config: dict = None) -> str:
     input_msg = HumanMessage(content=f"请帮我处理以下代码或路径：\n\n{code}")
     try:
         final_state = app_graph.invoke(
-            {"messages": [input_msg], "retry_count": 0}, run_config
+            {
+                "messages": [input_msg],
+                "retry_count": 0,
+                "review_protocol_errors": 0,
+                "review_status": "running",
+            },
+            run_config,
         )
         return final_state["messages"][-1].content
     except Exception as e:
@@ -59,9 +65,16 @@ def stream_refactor(
                     HumanMessage(content=f"请帮我处理以下代码或路径：\n\n{code}")
                 ],
                 "retry_count": 0,
+                "review_protocol_errors": 0,
+                "review_status": "running",
             }
         else:
-            stream_input = {"messages": [HumanMessage(content=code)]}
+            stream_input = {
+                "messages": [HumanMessage(content=code)],
+                "retry_count": 0,
+                "review_protocol_errors": 0,
+                "review_status": "running",
+            }
 
     try:
         # 传入初始消息字典、多轮追问消息或恢复 Command 进行流式迭代
@@ -119,6 +132,11 @@ def stream_refactor(
                                 yield text_content[i : i + chunk_size]
                 elif node_name == "developer_retry":
                     yield "\n[SYSTEM] 检测到审查未通过，已启动开发者重试节点...\n"
+                elif node_name == "reviewer_protocol_retry":
+                    yield "\n[INFO] Reviewer 未返回规定的终态标记，正在请求其修正结论...\n"
+                elif node_name == "finalize_review_failure":
+                    for msg in node_output.get("messages", []):
+                        yield f"\n{msg.content}\n"
                 elif node_name == "__interrupt__":
                     yield "\n[SYSTEM] 触发人机协作审查 (HITL)，请在弹窗中确认文件写入操作...\n"
     except Exception as e:

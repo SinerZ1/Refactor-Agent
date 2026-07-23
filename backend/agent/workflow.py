@@ -5,7 +5,15 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
 
 from .edges import route_architect, route_developer, route_reviewer
-from .nodes import call_architect, call_developer, call_reviewer, developer_retry_node
+from .nodes import (
+    call_architect,
+    call_developer,
+    call_reviewer,
+    developer_retry_node,
+    finalize_review_failure_node,
+    finalize_review_success_node,
+    reviewer_protocol_retry_node,
+)
 
 # 使用高内聚相对导入，解耦子包结构
 from .state import State
@@ -28,6 +36,9 @@ workflow.add_node("architect", call_architect)
 workflow.add_node("developer", call_developer)
 workflow.add_node("reviewer", call_reviewer)
 workflow.add_node("developer_retry", developer_retry_node)
+workflow.add_node("reviewer_protocol_retry", reviewer_protocol_retry_node)
+workflow.add_node("finalize_review_success", finalize_review_success_node)
+workflow.add_node("finalize_review_failure", finalize_review_failure_node)
 
 # 注册绑定的工具节点 (ToolNode)
 workflow.add_node("architect_tools", ToolNode(architect_tools))
@@ -65,10 +76,15 @@ workflow.add_conditional_edges(
     {
         "reviewer_tools": "reviewer_tools",
         "developer_retry": "developer_retry",
-        END: END,
+        "reviewer_protocol_retry": "reviewer_protocol_retry",
+        "finalize_review_success": "finalize_review_success",
+        "finalize_review_failure": "finalize_review_failure",
     },
 )
 workflow.add_edge("reviewer_tools", "reviewer")
+workflow.add_edge("reviewer_protocol_retry", "reviewer")
+workflow.add_edge("finalize_review_success", END)
+workflow.add_edge("finalize_review_failure", END)
 
 
 def get_checkpointer():

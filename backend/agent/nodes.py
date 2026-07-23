@@ -1,6 +1,6 @@
 import os
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
@@ -173,3 +173,39 @@ def developer_retry_node(state: State):
         content=f"[SYSTEM] 审查不通过。已开启第 {retries} 次重试，请开发者根据审查反馈进行修正。"
     )
     return {"messages": [retry_msg], "retry_count": retries}
+
+
+def reviewer_protocol_retry_node(state: State):
+    """要求 Reviewer 修正缺失的终态标记，并对协议重试进行有界计数。"""
+
+    protocol_errors = state.get("review_protocol_errors", 0) + 1
+    retry_msg = HumanMessage(
+        content=(
+            "[SYSTEM] 你的上一条审查结论缺少工作流协议标记。"
+            "请重新给出结论，并且必须包含 【REFACTOR_SUCCESS】 或 【REFACTOR_FAIL】。"
+        )
+    )
+    return {
+        "messages": [retry_msg],
+        "review_protocol_errors": protocol_errors,
+    }
+
+
+def finalize_review_success_node(_state):
+    """把 Reviewer 的成功标记固化为机器可读终态。"""
+
+    return {"review_status": "success"}
+
+
+def finalize_review_failure_node(state: State):
+    """在重试耗尽或协议连续失配时生成明确失败终态。"""
+
+    last_content = str(state["messages"][-1].content or "")
+    if "【REFACTOR_FAIL】" in last_content:
+        reason = "Developer 已达到最多 3 次重试，工作流终止。"
+    else:
+        reason = "Reviewer 连续未返回规定的成功或失败标记，工作流按失败终止。"
+    return {
+        "messages": [AIMessage(content=f"【REFACTOR_FAIL】{reason}")],
+        "review_status": "failed",
+    }
