@@ -1,6 +1,5 @@
 import asyncio
 import json
-from anyio.from_thread import run
 
 from langchain_core.messages import HumanMessage
 
@@ -25,7 +24,13 @@ def simple_refactor(code: str, config: dict = None) -> str:
         return f"# [运行失败]\n# 错误信息: {str(e)}"
 
 
-def stream_refactor(code: str, thread_id: str = "default_session", config: dict = None, ws_callback=None, main_loop=None):
+def stream_refactor(
+    code: str,
+    thread_id: str = "default_session",
+    config: dict = None,
+    ws_callback=None,
+    main_loop=None,
+):
     """
     使用 LangGraph 状态图执行多轮对话流式生成器
     """

@@ -25,3 +25,4 @@ pydantic>=2.9.0           # 数据校验/序列化
 pydantic-settings>=2.6.0  # 从.env读取配置(Neo4j/Redis凭据)
 python-dotenv>=1.0.1      # .env文件加载
 httpx>=0.28.0             # 后端代理模型目录请求，避免浏览器直连泄露密钥
+pywebview>=5.1.0           # 桌面端 GUI 框架，基于内置 Web 引擎托载 Vue 前端

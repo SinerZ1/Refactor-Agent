@@ -1,15 +1,15 @@
 import asyncio
 import json
+import os
 from typing import Dict, Literal
 
 import uvicorn
+from agent_core import simple_refactor, stream_refactor
+from code_indexer import index_directory
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field
-
-from agent_core import simple_refactor, stream_refactor
-from code_indexer import index_directory
+from fastapi.staticfiles import StaticFiles
 from graph_indexer import get_topology_data, index_to_neo4j
 from model_catalog import (
     ModelCatalogError,
@@ -17,6 +17,7 @@ from model_catalog import (
     inspect_adc_file,
     list_available_models,
 )
+from pydantic import BaseModel, ConfigDict, Field
 
 app = FastAPI(title="Refactor-Agent Backend")
 
@@ -218,7 +219,9 @@ def refactor_code_stream(request: RefactorRequest):
         )
 
     def event_generator():
-        for token in stream_refactor(request.code, request.thread_id, config, send_chatroom_message, main_loop):
+        for token in stream_refactor(
+            request.code, request.thread_id, config, send_chatroom_message, main_loop
+        ):
             # 将每个 token 序列化为 JSON 以便前端解析
             yield f"data: {json.dumps({'token': token})}\n\n"
 
@@ -243,15 +246,22 @@ def refactor_code_stream(request: RefactorRequest):
                     if loop and loop.is_running():
                         asyncio.run_coroutine_threadsafe(
                             manager.send_personal_message(
-                                {"type": "approval_request", "payload": interrupt_payload},
+                                {
+                                    "type": "approval_request",
+                                    "payload": interrupt_payload,
+                                },
                                 request.thread_id,
                             ),
                             loop,
                         )
                 except Exception as ex:
-                    print(f"[app] ERROR: Cannot send WS message using run_coroutine_threadsafe: {ex}")
+                    print(
+                        f"[app] ERROR: Cannot send WS message using run_coroutine_threadsafe: {ex}"
+                    )
             else:
-                print(f"[app] No interrupts found for thread `{request.thread_id}` after stream_refactor.")
+                print(
+                    f"[app] No interrupts found for thread `{request.thread_id}` after stream_refactor."
+                )
         except Exception as e:
             print(f"[app] Failed to check state interrupts: {e}")
 
@@ -264,6 +274,24 @@ def get_graph_topology():
     获取目前代码库的调用关系图拓扑数据，提供给前端可视化组件
     """
     return get_topology_data()
+
+
+# ============================================================
+# 【教学与理论关联 - 静态资源网关与 SPA 降级代理】
+# 托载本地编译后的 Vue 3 前端静态产物。
+# 采用 FastAPI StaticFiles 托管，如果检测到对应 dist 目录存在，则自动启动。
+# 这使得桌面端应用可以通过 Pywebview 容器直连本地服务，极大地简化了部署与人机协作。
+# ============================================================
+current_dir = os.path.dirname(os.path.abspath(__file__))
+frontend_dist_dir = os.path.abspath(os.path.join(current_dir, "..", "frontend", "dist"))
+
+if os.path.exists(frontend_dist_dir):
+    app.mount("/", StaticFiles(directory=frontend_dist_dir, html=True), name="static")
+    print(f"[Startup] Frontend static assets mounted from {frontend_dist_dir}")
+else:
+    print(
+        f"[Startup] Warning: Frontend static directory {frontend_dist_dir} not found. Please build frontend first."
+    )
 
 
 if __name__ == "__main__":

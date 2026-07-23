@@ -36,6 +36,7 @@
 所有后端命令必须在 `backend/` 目录下执行，且必须使用虚拟环境（venv）路径：
 - **Python 解释器**: `venv/Scripts/python.exe`
 - **启动服务**: `venv/Scripts/python.exe app.py` (运行在 `http://127.0.0.1:8000`)
+- **启动 GUI 桌面应用程序**: `venv/Scripts/python.exe main_gui.py` (基于 Pywebview，内置托管 Vue 3 静态编译前端)
 - **虚拟环境内置脚本** (位于 `backend/venv/Scripts/`，在 Windows 下直接运行)：
   - 代码格式化/导入排序: `venv/Scripts/format.exe`, `venv/Scripts/sort-imports.exe`
   - 格式与类型检查: `venv/Scripts/check-format.exe`, `venv/Scripts/check-sort-imports.exe`, `venv/Scripts/check-mypy.exe`, `venv/Scripts/check-lint.exe`

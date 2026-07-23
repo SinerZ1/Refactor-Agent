@@ -242,7 +242,7 @@ def _list_vertex_models_sync(config: ModelConnectionConfig) -> list[str]:
             )
 
         model_ids: set[str] = set()
-        for model in client.models.list(config={"page_size": 1000, "query_base": True}):
+        for model in client.models.list(config={"page_size": 300, "query_base": True}):
             if not model.name:
                 continue
             model_id = model.name.rsplit("/", 1)[-1].split("@", 1)[0]

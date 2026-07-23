@@ -89,7 +89,7 @@ def test_vertex_api_key_uses_express_mode_without_project_or_location(monkeypatc
     class FakeModels:
         @staticmethod
         def list(*, config):
-            assert config == {"page_size": 1000, "query_base": True}
+            assert config == {"page_size": 300, "query_base": True}
             return [SimpleNamespace(name="publishers/google/models/gemini-3.5-flash")]
 
     class FakeClient:
