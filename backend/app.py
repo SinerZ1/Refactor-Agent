@@ -4,12 +4,15 @@ import os
 from typing import Dict, Literal
 
 import uvicorn
-from agent_core import simple_refactor, stream_refactor
-from code_indexer import index_directory
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
+
+from agent.credentials import runtime_credentials
+from agent_core import simple_refactor, stream_refactor
+from code_indexer import index_directory
 from graph_indexer import get_topology_data, index_to_neo4j
 from model_catalog import (
     ModelCatalogError,
@@ -17,7 +20,6 @@ from model_catalog import (
     inspect_adc_file,
     list_available_models,
 )
-from pydantic import BaseModel, ConfigDict, Field
 
 app = FastAPI(title="Refactor-Agent Backend")
 
@@ -121,12 +123,35 @@ app.add_middleware(
 # 而是使用 Pydantic v2 提供的 `Field(alias="...")` 机制进行别名映射，使字段在 Python 内部表示为 `custom_model_config`。
 # 配合 `populate_by_name=True`，允许 Python 代码中无论使用属性名还是别名，均能正常加载与解析。
 # ============================================================
+class RuntimeModelConfig(BaseModel):
+    """进入 Agent 的模型配置；密钥会在构图前迁移到进程内凭据仓库。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    provider: Literal["openai", "gemini_studio", "google_vertex"] = "openai"
+    api_key: SecretStr = SecretStr("")
+    base_url: str = ""
+    model_name: str = ""
+    temperature: float = Field(default=0.2, ge=0.0, le=2.0)
+    vertex_project_id: str = ""
+    vertex_location: str = "global"
+    vertex_model_name: str = ""
+    vertex_auth_mode: Literal["adc", "api_key"] = "adc"
+
+
 class RefactorRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     code: str
-    thread_id: str = "default_session"
-    custom_model_config: dict | None = Field(default=None, alias="model_config")
+    thread_id: str = Field(
+        default="default_session",
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9._:-]+$",
+    )
+    custom_model_config: RuntimeModelConfig | None = Field(
+        default=None, alias="model_config"
+    )
 
 
 # 定义返回的数据模型
@@ -149,6 +174,24 @@ class ModelConnectionRequest(BaseModel):
 class ModelConnectionResponse(BaseModel):
     models: list[str]
     message: str
+
+
+def build_graph_config(
+    request: RefactorRequest,
+) -> tuple[dict[str, dict[str, object]], str | None]:
+    """构造可持久化的图配置，并把真正密钥替换成随机引用。"""
+
+    configurable: dict[str, object] = {"thread_id": request.thread_id}
+    credential_ref: str | None = None
+    if request.custom_model_config:
+        model_settings = request.custom_model_config
+        configurable.update(model_settings.model_dump(exclude={"api_key"}))
+        credential_ref = runtime_credentials.store(
+            model_settings.api_key.get_secret_value()
+        )
+        if credential_ref:
+            configurable["credential_ref"] = credential_ref
+    return {"configurable": configurable}, credential_ref
 
 
 @app.get("/")
@@ -183,14 +226,11 @@ def refactor_code(request: RefactorRequest):
     """
     接收代码，调用 Agent 进行简单重构
     """
-    config: dict[str, dict[str, object]] = {
-        "configurable": {
-            "thread_id": request.thread_id,
-        }
-    }
-    if request.custom_model_config:
-        config["configurable"].update(request.custom_model_config)
-    refactored_result = simple_refactor(request.code, config)
+    config, credential_ref = build_graph_config(request)
+    try:
+        refactored_result = simple_refactor(request.code, config)
+    finally:
+        runtime_credentials.revoke(credential_ref)
 
     return RefactorResponse(
         original_code=request.code, refactored_code=refactored_result
@@ -202,13 +242,7 @@ def refactor_code_stream(request: RefactorRequest):
     """
     流式接收重构代码，返回 SSE (Server-Sent Events) 流
     """
-    config: dict[str, dict[str, object]] = {
-        "configurable": {
-            "thread_id": request.thread_id,
-        }
-    }
-    if request.custom_model_config:
-        config["configurable"].update(request.custom_model_config)
+    config, credential_ref = build_graph_config(request)
 
     # 阶段 2：检测是否需要恢复已被挂起的执行
     if request.thread_id in session_approvals:
@@ -219,51 +253,59 @@ def refactor_code_stream(request: RefactorRequest):
         )
 
     def event_generator():
-        for token in stream_refactor(
-            request.code, request.thread_id, config, send_chatroom_message, main_loop
-        ):
-            # 将每个 token 序列化为 JSON 以便前端解析
-            yield f"data: {json.dumps({'token': token})}\n\n"
-
-        # 阶段 2：执行完毕后，检查是否产生了新的挂起（Interrupt）
-        from agent import app_graph
-
         try:
-            state = app_graph.get_state(config)
-            if state.interrupts:
-                # 存在挂起中断（即 write_code_file 工具调用前暂停）
-                interrupt_payload = state.interrupts[0].value
-                print(
-                    f"[app] Graph suspended on interrupt for `{request.thread_id}`. Sending WS message and SSE token."
-                )
+            for token in stream_refactor(
+                request.code,
+                request.thread_id,
+                config,
+                send_chatroom_message,
+                main_loop,
+            ):
+                # 将每个 token 序列化为 JSON 以便前端解析
+                yield f"data: {json.dumps({'token': token})}\n\n"
 
-                # 方案 A：通过 SSE 确保前端必定收到
-                yield f"data: {json.dumps({'token': '[APPROVAL_REQUEST]' + json.dumps(interrupt_payload)})}\n\n"
+            # 阶段 2：执行完毕后，检查是否产生了新的挂起（Interrupt）
+            from agent import app_graph
 
-                # 方案 B：同时尝试通过 WebSocket 发送（向下兼容）
-                try:
-                    loop = main_loop
-                    if loop and loop.is_running():
-                        asyncio.run_coroutine_threadsafe(
-                            manager.send_personal_message(
-                                {
-                                    "type": "approval_request",
-                                    "payload": interrupt_payload,
-                                },
-                                request.thread_id,
-                            ),
-                            loop,
-                        )
-                except Exception as ex:
+            try:
+                state = app_graph.get_state(config)
+                if state.interrupts:
+                    # 存在挂起中断（即 write_code_file 工具调用前暂停）
+                    interrupt_payload = state.interrupts[0].value
                     print(
-                        f"[app] ERROR: Cannot send WS message using run_coroutine_threadsafe: {ex}"
+                        f"[app] Graph suspended on interrupt for `{request.thread_id}`. Sending WS message and SSE token."
                     )
-            else:
-                print(
-                    f"[app] No interrupts found for thread `{request.thread_id}` after stream_refactor."
-                )
-        except Exception as e:
-            print(f"[app] Failed to check state interrupts: {e}")
+
+                    # 方案 A：通过 SSE 确保前端必定收到
+                    yield f"data: {json.dumps({'token': '[APPROVAL_REQUEST]' + json.dumps(interrupt_payload)})}\n\n"
+
+                    # 方案 B：同时尝试通过 WebSocket 发送（向下兼容）
+                    try:
+                        loop = main_loop
+                        if loop and loop.is_running():
+                            asyncio.run_coroutine_threadsafe(
+                                manager.send_personal_message(
+                                    {
+                                        "type": "approval_request",
+                                        "payload": interrupt_payload,
+                                    },
+                                    request.thread_id,
+                                ),
+                                loop,
+                            )
+                    except Exception as ex:
+                        print(
+                            f"[app] ERROR: Cannot send WS message using run_coroutine_threadsafe: {ex}"
+                        )
+                else:
+                    print(
+                        f"[app] No interrupts found for thread `{request.thread_id}` after stream_refactor."
+                    )
+            except Exception as e:
+                print(f"[app] Failed to check state interrupts: {e}")
+        finally:
+            # 客户端断开时生成器也会进入 finally，避免凭据在内存中滞留到 TTL。
+            runtime_credentials.revoke(credential_ref)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 

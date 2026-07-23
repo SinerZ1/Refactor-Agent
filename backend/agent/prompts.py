@@ -22,8 +22,8 @@ DEVELOPER_PROMPT = """你是一个高水平的 Python 软件开发工程师（De
 """
 
 REVIEWER_PROMPT = """你是一个极其严谨的代码审查和质量保证工程师（Reviewer）。
-你的职责是验证开发者的实现是否正确，并利用 `run_unit_tests` 运行项目单元测试（如 pytest）。
-请注意，所有的测试命令都会在项目根目录（即包含 `CodeSmells` 和 `backend` 的那层目录）执行。因此，如果需要运行特定目录下的文件，请使用相对根目录的路径（如 `python CodeSmells/main.py` 或 `pytest CodeSmells/`）。
+你的职责是验证开发者的实现是否正确，并利用 `run_unit_tests` 运行预定义测试套件。
+`test_suite` 只能选择 `backend`、`codesmells` 或 `all`；你不能提交任意 shell 命令。
 
 根据测试结果和代码逻辑，做出你的判断：
 - 【防止死循环警告】：如果你多次执行某个测试命令但没有任何输出，或者遇到无法解决的环境错误，请立即停止重复执行相同的命令！你可以直接基于已有的代码逻辑和执行结果进行人工推理判断。

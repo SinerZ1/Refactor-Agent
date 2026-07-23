@@ -6,6 +6,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
 
+from .credentials import runtime_credentials
 from .prompts import ARCHITECT_PROMPT, DEVELOPER_PROMPT, REVIEWER_PROMPT
 
 # 使用相对导入保证子包高内聚、易移植
@@ -19,6 +20,19 @@ from .tools import architect_tools, developer_tools, reviewer_tools
 # 为了支持多用户及前端动态配置 API Key，我们在节点执行时通过 config["configurable"]
 # 动态加载并实例化对应的 LLM 客户端，实现彻底的 Session 级模型路由隔离。这避免了全局单例 LLM 造成的并发/密钥冲突。
 # ============================================================
+
+
+def _get_runtime_api_key(cfg: dict, *environment_names: str) -> str:
+    """从短期凭据仓库取密钥，未提供客户端密钥时再读取服务端环境变量。"""
+
+    credential_ref = cfg.get("credential_ref")
+    if credential_ref:
+        return runtime_credentials.resolve(str(credential_ref))
+    for environment_name in environment_names:
+        api_key = os.getenv(environment_name)
+        if api_key:
+            return api_key
+    return ""
 
 
 def get_llm_from_config(config: RunnableConfig):
@@ -36,7 +50,7 @@ def get_llm_from_config(config: RunnableConfig):
     temperature = cfg.get("temperature", 0.2)
 
     if provider == "openai":
-        api_key = str(cfg.get("api_key") or os.getenv("OPENAI_API_KEY", ""))
+        api_key = _get_runtime_api_key(cfg, "OPENAI_API_KEY")
         base_url = str(
             cfg.get("base_url")
             or os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
@@ -49,11 +63,7 @@ def get_llm_from_config(config: RunnableConfig):
         )
 
     elif provider == "gemini_studio":
-        api_key = str(
-            cfg.get("api_key")
-            or os.getenv("GEMINI_API_KEY")
-            or os.getenv("GOOGLE_API_KEY", "")
-        )
+        api_key = _get_runtime_api_key(cfg, "GEMINI_API_KEY", "GOOGLE_API_KEY")
         return ChatGoogleGenerativeAI(
             model=model_name,
             google_api_key=api_key,
@@ -74,11 +84,8 @@ def get_llm_from_config(config: RunnableConfig):
         auth_mode = cfg.get("vertex_auth_mode", "adc")  # "adc" 或 "api_key"
 
         if auth_mode == "adc":
-            adc_path = cfg.get("vertex_adc_path") or os.getenv(
-                "GOOGLE_APPLICATION_CREDENTIALS", ""
-            )
-            if adc_path:
-                os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = adc_path
+            # ADC 路径只能由后端启动环境提供，不能由单次请求改写进程级环境变量。
+            # 这避免并发会话互相替换认证身份，也阻止客户端借路径参数探测本机文件。
             return ChatGoogleGenerativeAI(
                 model=model,
                 project=project,
@@ -87,7 +94,7 @@ def get_llm_from_config(config: RunnableConfig):
                 temperature=temperature,
             )
         else:  # "api_key"
-            api_key = str(cfg.get("api_key") or os.getenv("VERTEX_API_KEY", ""))
+            api_key = _get_runtime_api_key(cfg, "VERTEX_API_KEY")
             # Vertex AI 的 API Key 属于 Express Mode；Google Gen AI 客户端明确要求
             # API Key 与 project/location 互斥。这里与模型目录连接测试保持同一鉴权语义，
             # 避免 UI 显示连接成功、真正执行 Agent 时却因参数冲突失败。

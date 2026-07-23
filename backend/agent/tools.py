@@ -1,5 +1,7 @@
 import os
 import subprocess
+from pathlib import Path
+from typing import Literal
 
 from langchain_core.tools import tool
 from langgraph.errors import GraphInterrupt
@@ -14,16 +16,33 @@ from langgraph.types import interrupt
 # ============================================================
 
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+REFACTOR_ROOT = (PROJECT_ROOT / "CodeSmells").resolve()
+MAX_CODE_FILE_BYTES = 1_000_000
+
+
 def get_project_root() -> str:
     """获取项目根目录，即 backend 的上一级目录"""
-    return os.path.abspath(os.path.join(os.path.dirname(__file__), "../../"))
+    return str(PROJECT_ROOT)
 
 
 def resolve_path(file_path: str) -> str:
-    """将相对路径解析为基于项目根目录的绝对路径"""
-    if os.path.isabs(file_path):
-        return file_path
-    return os.path.join(get_project_root(), file_path)
+    """把模型给出的相对路径限制在 ``CodeSmells`` 重构工作区内。
+
+    提示词只是软约束，路径规范化才是工具层的安全边界。先拒绝绝对路径，再解析
+    ``..`` 与已有符号链接，确保最终目标仍位于允许根目录，避免 Agent 读取密钥、
+    修改自身后端或越界访问用户文件。
+    """
+
+    if not file_path or not file_path.strip():
+        raise ValueError("文件路径不能为空")
+    requested_path = Path(file_path.strip())
+    if requested_path.is_absolute():
+        raise ValueError("仅允许使用 CodeSmells 目录内的相对路径")
+    resolved_path = (PROJECT_ROOT / requested_path).resolve(strict=False)
+    if not resolved_path.is_relative_to(REFACTOR_ROOT):
+        raise ValueError("文件路径超出允许的 CodeSmells 重构工作区")
+    return str(resolved_path)
 
 
 @tool
@@ -33,6 +52,8 @@ def read_code_file(file_path: str) -> str:
     """
     try:
         abs_path = resolve_path(file_path)
+        if os.path.getsize(abs_path) > MAX_CODE_FILE_BYTES:
+            return "读取文件失败: 文件超过 1 MB 安全上限"
         with open(abs_path, "r", encoding="utf-8") as f:
             return f.read()
     except Exception as e:
@@ -45,6 +66,8 @@ def write_code_file(file_path: str, content: str) -> str:
     将重构后的完整代码写入到指定的本地文件路径中。当重构完成并且需要保存修改时使用。
     """
     try:
+        if len(content.encode("utf-8")) > MAX_CODE_FILE_BYTES:
+            return "写入文件失败: 内容超过 1 MB 安全上限"
         abs_path = resolve_path(file_path)
         # 获取原文件代码（如果存在），供前端展示 Diff 对比
         original_code = ""
@@ -95,20 +118,36 @@ def write_code_file(file_path: str, content: str) -> str:
 
 
 @tool
-def run_unit_tests(test_command: str = "pytest") -> str:
+def run_unit_tests(
+    test_suite: Literal["backend", "codesmells", "all"] = "all",
+) -> str:
     """
-    执行本项目的测试命令（例如 pytest）来运行单元测试，验证重构后的代码是否符合质量标准。
+    运行预定义测试套件。只能选择 backend、codesmells 或 all，不能传入 shell 命令。
     """
     try:
         encoding_format = "gbk" if os.name == "nt" else "utf-8"
+        python_executable = PROJECT_ROOT / "backend" / "venv" / "Scripts" / "python.exe"
+        test_targets = {
+            "backend": ["backend/tests"],
+            "codesmells": ["CodeSmells"],
+            "all": ["backend/tests", "CodeSmells"],
+        }
+        command = [
+            str(python_executable),
+            "-m",
+            "pytest",
+            "-p",
+            "no:cacheprovider",
+            *test_targets[test_suite],
+        ]
         result = subprocess.run(
-            test_command,
-            shell=True,
+            command,
+            shell=False,
             capture_output=True,
             text=True,
             encoding=encoding_format,
             errors="replace",
-            timeout=20,
+            timeout=60,
             cwd=get_project_root(),
         )
         output = (result.stdout or "").strip() + "\n" + (result.stderr or "").strip()
