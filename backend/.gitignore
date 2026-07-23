@@ -1,18 +1,18 @@
-# Python
-__pycache__/
-*.py[cod]
+# Python 虚拟环境与构建产物
 *.egg-info/
 .venv/
 venv/
+build/
+dist/
 
-# 环境与密钥
-.env
-.env.*
+# 测试与覆盖率产物
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+tests_tmp/
+.pytest_cache/
 
 # IDE
 .vscode/
 .idea/
-
-# 前端
-node_modules/
-dist/

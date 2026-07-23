@@ -1,4 +1,19 @@
-RefactorAgentPlan.md
-node_modules
-key*
-__pycache__
+# 仅供本地使用的项目文件
+/RefactorAgentPlan.md
+/node_modules/
+/keys.py
+/keys.txt
+
+# 环境变量与凭据
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Python 在仓库各层级生成的缓存
+__pycache__/
+*.py[cod]
+.ruff_cache/
+.pytest_tmp/
+.pytest_cache/
+.mypy_cache/
