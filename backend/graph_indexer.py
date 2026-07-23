@@ -3,14 +3,13 @@ import os
 from pathlib import Path
 from typing import Any, TypedDict
 
-from dotenv import load_dotenv
-from neo4j import GraphDatabase
-
 from code_indexer import (
     display_file_path,
     resolve_source_directory,
     symbol_identity,
 )
+from dotenv import load_dotenv
+from neo4j import GraphDatabase
 
 load_dotenv()
 
@@ -68,9 +67,7 @@ class _GraphSymbolVisitor(ast.NodeVisitor):
                 "qualname": qualname,
                 "type": "Class" if isinstance(node, ast.ClassDef) else "Function",
                 "file_path": display_file_path(self.file_path, self.source_root),
-                "code": "\n".join(
-                    self.source_lines[node.lineno - 1 : end_line]
-                ),
+                "code": "\n".join(self.source_lines[node.lineno - 1 : end_line]),
                 "node_ref": node,
             }
         )
@@ -257,7 +254,10 @@ def _fallback_topology() -> TopologyData:
     symbols, calls = parse_code_to_graph()
     return {
         "nodes": [
-            {key: symbol[key] for key in ("id", "name", "qualname", "type", "file_path")}
+            {
+                key: symbol[key]
+                for key in ("id", "name", "qualname", "type", "file_path")
+            }
             for symbol in symbols
         ],
         "links": [{"source": source, "target": target} for source, target in calls],

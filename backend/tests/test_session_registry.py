@@ -1,5 +1,4 @@
 import pytest
-
 from session_registry import (
     ApprovalStateError,
     SessionAuthorizationError,
@@ -41,9 +40,7 @@ def test_approval_decision_is_bound_to_current_nonce():
         credentials.thread_id, credentials.session_token
     ) == (approval_id, True)
     assert (
-        registry.consume_decision(
-            credentials.thread_id, credentials.session_token
-        )
+        registry.consume_decision(credentials.thread_id, credentials.session_token)
         is None
     )
 
@@ -52,12 +49,8 @@ def test_pending_approval_id_is_idempotent_until_decided():
     registry = SessionRegistry()
     credentials = registry.create()
 
-    first = registry.begin_approval(
-        credentials.thread_id, credentials.session_token
-    )
-    second = registry.begin_approval(
-        credentials.thread_id, credentials.session_token
-    )
+    first = registry.begin_approval(credentials.thread_id, credentials.session_token)
+    second = registry.begin_approval(credentials.thread_id, credentials.session_token)
 
     assert first == second
 

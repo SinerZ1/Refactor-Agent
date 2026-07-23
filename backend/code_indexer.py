@@ -31,9 +31,7 @@ def resolve_source_directory(directory_path: str | Path = "CodeSmells") -> Path:
         candidate = (
             project_candidate
             if project_candidate.exists()
-            else backend_candidate
-            if backend_candidate.exists()
-            else project_candidate
+            else backend_candidate if backend_candidate.exists() else project_candidate
         )
     return candidate.resolve()
 
@@ -45,7 +43,9 @@ def display_file_path(file_path: Path, source_root: Path) -> str:
     try:
         return resolved_file.relative_to(PROJECT_ROOT).as_posix()
     except ValueError:
-        return (Path(source_root.name) / resolved_file.relative_to(source_root)).as_posix()
+        return (
+            Path(source_root.name) / resolved_file.relative_to(source_root)
+        ).as_posix()
 
 
 def symbol_identity(file_path: Path, source_root: Path, qualname: str) -> str:
@@ -76,9 +76,7 @@ class _SymbolVisitor(ast.NodeVisitor):
                 "qualname": qualname,
                 "type": "Class" if isinstance(node, ast.ClassDef) else "Function",
                 "file_path": display_file_path(self.file_path, self.source_root),
-                "code": "\n".join(
-                    self.source_lines[node.lineno - 1 : end_line]
-                ),
+                "code": "\n".join(self.source_lines[node.lineno - 1 : end_line]),
             }
         )
         self.scope.append(node.name)
@@ -124,9 +122,7 @@ def index_directory(directory_path: str | Path = "CodeSmells") -> int:
     return len(next_index)
 
 
-def index_file(
-    file_path: str | Path, directory_path: str | Path = "CodeSmells"
-) -> int:
+def index_file(file_path: str | Path, directory_path: str | Path = "CodeSmells") -> int:
     """增量替换单文件符号，供 HITL 批准写入后立即刷新 RAG。"""
 
     source_root = resolve_source_directory(directory_path)

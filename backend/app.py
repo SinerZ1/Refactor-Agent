@@ -5,15 +5,13 @@ from typing import Literal
 from urllib.parse import urlsplit
 
 import uvicorn
+from agent.credentials import runtime_credentials
+from agent_core import simple_refactor, stream_refactor
+from code_indexer import index_directory
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
-
-from agent.credentials import runtime_credentials
-from agent_core import simple_refactor, stream_refactor
-from code_indexer import index_directory
 from graph_indexer import get_topology_data, index_to_neo4j
 from model_catalog import (
     ModelCatalogError,
@@ -21,6 +19,7 @@ from model_catalog import (
     inspect_adc_file,
     list_available_models,
 )
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
 from session_registry import (
     ApprovalStateError,
     SessionAuthorizationError,

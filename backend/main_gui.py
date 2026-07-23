@@ -17,12 +17,13 @@ from urllib.request import urlopen
 
 import uvicorn
 import webview
-
 from app import app
 
 BACKEND_HOST = "127.0.0.1"
 STARTUP_TIMEOUT_SECONDS = 30.0
-FRONTEND_INDEX = Path(__file__).resolve().parent.parent / "frontend" / "dist" / "index.html"
+FRONTEND_INDEX = (
+    Path(__file__).resolve().parent.parent / "frontend" / "dist" / "index.html"
+)
 
 
 def build_backend_server() -> tuple[uvicorn.Server, socket.socket, int]:
