@@ -1,7 +1,7 @@
 import asyncio
 import json
 import os
-from typing import Dict, Literal
+from typing import Literal
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -20,24 +20,44 @@ from model_catalog import (
     inspect_adc_file,
     list_available_models,
 )
+from session_registry import (
+    ApprovalStateError,
+    SessionAuthorizationError,
+    runtime_sessions,
+)
 
 app = FastAPI(title="Refactor-Agent Backend")
 
-session_approvals: Dict[str, bool] = {}
+DEFAULT_ALLOWED_ORIGINS = {
+    "http://127.0.0.1:5173",
+    "http://localhost:5173",
+    "http://127.0.0.1:8000",
+    "http://localhost:8000",
+}
+ALLOWED_ORIGINS = {
+    origin.strip()
+    for origin in os.getenv(
+        "ALLOWED_ORIGINS", ",".join(sorted(DEFAULT_ALLOWED_ORIGINS))
+    ).split(",")
+    if origin.strip()
+}
 
 
 class ConnectionManager:
     def __init__(self):
-        self.active_connections: Dict[str, WebSocket] = {}
+        self.active_connections: dict[str, WebSocket] = {}
 
     async def connect(self, websocket: WebSocket, thread_id: str):
         await websocket.accept()
+        previous = self.active_connections.get(thread_id)
+        if previous and previous is not websocket:
+            await previous.close(code=1012, reason="会话已在新连接中恢复")
         self.active_connections[thread_id] = websocket
         print(f"[WebSocket] Thread `{thread_id}` connected.")
 
-    def disconnect(self, thread_id: str):
-        if thread_id in self.active_connections:
-            del self.active_connections[thread_id]
+    def disconnect(self, thread_id: str, websocket: WebSocket):
+        if self.active_connections.get(thread_id) is websocket:
+            self.active_connections.pop(thread_id, None)
             print(f"[WebSocket] Thread `{thread_id}` disconnected.")
 
     async def send_personal_message(self, message: dict, thread_id: str):
@@ -58,24 +78,48 @@ manager = ConnectionManager()
 
 @app.websocket("/ws/refactor/{thread_id}")
 async def websocket_endpoint(websocket: WebSocket, thread_id: str):
+    origin = websocket.headers.get("origin")
+    session_token = websocket.query_params.get("token", "")
+    if origin and origin not in ALLOWED_ORIGINS:
+        await websocket.close(code=1008, reason="Origin 不在允许列表")
+        return
+    try:
+        runtime_sessions.require(thread_id, session_token)
+    except SessionAuthorizationError:
+        await websocket.close(code=1008, reason="会话认证失败")
+        return
+
     await manager.connect(websocket, thread_id)
     try:
         while True:
             data = await websocket.receive_json()
-            print(f"[WebSocket] Received message from thread `{thread_id}`: {data}")
 
             # 阶段 2: 处理审批放行/拒绝信号
             if data.get("type") == "approval_response":
-                approved = data.get("approved", False)
-                session_approvals[thread_id] = approved
-                await websocket.send_json({"type": "approval_confirmed"})
-                print(f"[WebSocket] Approval saved for `{thread_id}`: {approved}")
+                try:
+                    runtime_sessions.decide(
+                        thread_id,
+                        session_token,
+                        str(data.get("approval_id", "")),
+                        bool(data.get("approved", False)),
+                    )
+                except ApprovalStateError as exc:
+                    await websocket.send_json(
+                        {"type": "approval_error", "message": str(exc)}
+                    )
+                    continue
+                await websocket.send_json(
+                    {
+                        "type": "approval_confirmed",
+                        "approval_id": data.get("approval_id"),
+                    }
+                )
 
     except WebSocketDisconnect:
-        manager.disconnect(thread_id)
+        manager.disconnect(thread_id, websocket)
     except Exception as e:
         print(f"[WebSocket Error] Thread `{thread_id}`: {e}")
-        manager.disconnect(thread_id)
+        manager.disconnect(thread_id, websocket)
 
 
 async def send_chatroom_message(thread_id: str, sender: str, content: str):
@@ -108,7 +152,7 @@ def startup_event():
 # 配置 CORS，允许前端应用访问
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 允许所有源（开发环境方便调试）
+    allow_origins=sorted(ALLOWED_ORIGINS),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -152,6 +196,7 @@ class RefactorRequest(BaseModel):
     custom_model_config: RuntimeModelConfig | None = Field(
         default=None, alias="model_config"
     )
+    session_token: SecretStr = SecretStr("")
 
 
 # 定义返回的数据模型
@@ -176,6 +221,22 @@ class ModelConnectionResponse(BaseModel):
     message: str
 
 
+class SessionResponse(BaseModel):
+    thread_id: str
+    session_token: str
+
+
+class ApprovalDecisionRequest(BaseModel):
+    session_token: SecretStr
+    approval_id: str = Field(min_length=1, max_length=128)
+    approved: bool
+
+
+class ApprovalDecisionResponse(BaseModel):
+    approval_id: str
+    accepted: bool = True
+
+
 def build_graph_config(
     request: RefactorRequest,
 ) -> tuple[dict[str, dict[str, object]], str | None]:
@@ -194,9 +255,46 @@ def build_graph_config(
     return {"configurable": configurable}, credential_ref
 
 
+def authorize_refactor_request(request: RefactorRequest) -> str:
+    session_token = request.session_token.get_secret_value()
+    try:
+        runtime_sessions.require(request.thread_id, session_token)
+    except SessionAuthorizationError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    return session_token
+
+
 @app.get("/")
 def read_root():
     return {"message": "Welcome to Refactor-Agent API. The service is running!"}
+
+
+@app.post("/api/sessions", response_model=SessionResponse)
+def create_session():
+    credentials = runtime_sessions.create()
+    return SessionResponse(
+        thread_id=credentials.thread_id,
+        session_token=credentials.session_token,
+    )
+
+
+@app.post(
+    "/api/sessions/{thread_id}/approval",
+    response_model=ApprovalDecisionResponse,
+)
+def submit_approval(thread_id: str, request: ApprovalDecisionRequest):
+    try:
+        runtime_sessions.decide(
+            thread_id,
+            request.session_token.get_secret_value(),
+            request.approval_id,
+            request.approved,
+        )
+    except SessionAuthorizationError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    except ApprovalStateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return ApprovalDecisionResponse(approval_id=request.approval_id)
 
 
 @app.get("/api/models/adc-status")
@@ -226,6 +324,7 @@ def refactor_code(request: RefactorRequest):
     """
     接收代码，调用 Agent 进行简单重构
     """
+    authorize_refactor_request(request)
     config, credential_ref = build_graph_config(request)
     try:
         refactored_result = simple_refactor(request.code, config)
@@ -242,11 +341,15 @@ def refactor_code_stream(request: RefactorRequest):
     """
     流式接收重构代码，返回 SSE (Server-Sent Events) 流
     """
+    session_token = authorize_refactor_request(request)
     config, credential_ref = build_graph_config(request)
 
     # 阶段 2：检测是否需要恢复已被挂起的执行
-    if request.thread_id in session_approvals:
-        approved = session_approvals.pop(request.thread_id)
+    approval_decision = runtime_sessions.consume_decision(
+        request.thread_id, session_token
+    )
+    if approval_decision:
+        _, approved = approval_decision
         config["configurable"]["resume_value"] = {"approved": approved}
         print(
             f"[app] Resuming graph for thread `{request.thread_id}` with approved={approved}"
@@ -271,7 +374,10 @@ def refactor_code_stream(request: RefactorRequest):
                 state = app_graph.get_state(config)
                 if state.interrupts:
                     # 存在挂起中断（即 write_code_file 工具调用前暂停）
-                    interrupt_payload = state.interrupts[0].value
+                    interrupt_payload = dict(state.interrupts[0].value)
+                    interrupt_payload["approval_id"] = runtime_sessions.begin_approval(
+                        request.thread_id, session_token
+                    )
                     print(
                         f"[app] Graph suspended on interrupt for `{request.thread_id}`. Sending WS message and SSE token."
                     )

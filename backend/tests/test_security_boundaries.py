@@ -10,7 +10,10 @@ from agent.credentials import (
     EphemeralCredentialVault,
     runtime_credentials,
 )
-from app import RefactorRequest, build_graph_config
+from fastapi import HTTPException
+
+from app import RefactorRequest, authorize_refactor_request, build_graph_config
+from session_registry import runtime_sessions
 
 
 def test_graph_config_replaces_api_key_with_opaque_reference():
@@ -18,6 +21,7 @@ def test_graph_config_replaces_api_key_with_opaque_reference():
         {
             "code": "CodeSmells/main.py",
             "thread_id": "security-test",
+            "session_token": "session-test-secret",
             "model_config": {
                 "provider": "openai",
                 "api_key": "unit-test-secret",
@@ -33,7 +37,9 @@ def test_graph_config_replaces_api_key_with_opaque_reference():
         metadata = get_checkpoint_metadata(config, {})
 
         assert "api_key" not in configurable
+        assert "session_token" not in configurable
         assert "unit-test-secret" not in repr(config)
+        assert "session-test-secret" not in repr(config)
         assert "unit-test-secret" not in repr(metadata)
         assert configurable["credential_ref"] == credential_ref
         assert runtime_credentials.resolve(credential_ref or "") == "unit-test-secret"
@@ -64,6 +70,25 @@ def test_request_cannot_override_process_adc_path():
                 },
             }
         )
+
+
+def test_refactor_request_requires_backend_issued_session():
+    credentials = runtime_sessions.create()
+    authorized_request = RefactorRequest(
+        code="CodeSmells/main.py",
+        thread_id=credentials.thread_id,
+        session_token=credentials.session_token,
+    )
+    assert authorize_refactor_request(authorized_request) == credentials.session_token
+
+    unauthorized_request = RefactorRequest(
+        code="CodeSmells/main.py",
+        thread_id=credentials.thread_id,
+        session_token="wrong-token",
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        authorize_refactor_request(unauthorized_request)
+    assert exc_info.value.status_code == 401
 
 
 @pytest.mark.parametrize(

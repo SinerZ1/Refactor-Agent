@@ -5,13 +5,25 @@ import App from '../App.vue'
 
 class WebSocketStub {
   static readonly OPEN = 1
+  static readonly CLOSED = 3
+  static instances: WebSocketStub[] = []
+
+  readonly url: string
   readyState = WebSocketStub.OPEN
+  sentMessages: string[] = []
   onmessage: ((event: MessageEvent) => void) | null = null
   onclose: (() => void) | null = null
   onerror: ((event: Event) => void) | null = null
 
+  constructor(url: string) {
+    this.url = url
+    WebSocketStub.instances.push(this)
+  }
+
   close() {}
-  send() {}
+  send(message: string) {
+    this.sentMessages.push(message)
+  }
 }
 
 type SystemThemeListener = (event: MediaQueryListEvent) => void
@@ -20,7 +32,13 @@ const mountApp = () =>
   mount(App, {
     global: {
       stubs: {
-        TopologyGraph: true,
+        TopologyGraph: {
+          template: '<div></div>',
+          methods: {
+            refresh: () => undefined,
+            resize: () => undefined,
+          },
+        },
         VueFlow: true,
       },
     },
@@ -35,6 +53,7 @@ describe('App', () => {
     localStorage.clear()
     systemDark = false
     systemThemeListener = null
+    WebSocketStub.instances = []
 
     vi.stubGlobal('WebSocket', WebSocketStub)
     vi.stubGlobal(
@@ -48,6 +67,18 @@ describe('App', () => {
         ),
       ),
     )
+    vi.mocked(fetch).mockImplementation(async (input) => {
+      if (String(input).endsWith('/api/sessions')) {
+        return new Response(
+          JSON.stringify({ thread_id: 'session_test', session_token: 'session-token' }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        )
+      }
+      return new Response(
+        JSON.stringify({ available: false, message: '未找到有效 ADC 凭据文件' }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      )
+    })
     Object.defineProperty(window, 'matchMedia', {
       configurable: true,
       value: vi.fn<(query: string) => MediaQueryList>(() => {
@@ -119,6 +150,12 @@ describe('App', () => {
   it('connects to the selected provider and fills the model field', async () => {
     vi.mocked(fetch).mockImplementation(async (input) => {
       const url = String(input)
+      if (url.endsWith('/api/sessions')) {
+        return new Response(
+          JSON.stringify({ thread_id: 'session_test', session_token: 'session-token' }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        )
+      }
       if (url.endsWith('/api/models/connect')) {
         return new Response(
           JSON.stringify({ models: ['deepseek-v4-pro'], message: '连接成功，共发现 1 个模型' }),
@@ -146,5 +183,68 @@ describe('App', () => {
     )
     expect(wrapper.get('.connection-feedback').text()).toContain('连接成功')
     expect(localStorage.getItem('refactor_agent_model_config')).not.toContain('test-key')
+  })
+
+  it('authenticates the websocket with the backend-issued session', async () => {
+    wrapper = mountApp()
+    await flushPromises()
+
+    expect(WebSocketStub.instances).toHaveLength(1)
+    expect(WebSocketStub.instances[0]!.url).toContain('/ws/refactor/session_test')
+    expect(WebSocketStub.instances[0]!.url).toContain('token=session-token')
+  })
+
+  it('submits approval through REST when websocket is disconnected', async () => {
+    vi.mocked(fetch).mockImplementation(async (input) => {
+      const url = String(input)
+      if (url.endsWith('/api/sessions')) {
+        return new Response(
+          JSON.stringify({ thread_id: 'session_test', session_token: 'session-token' }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        )
+      }
+      if (url.includes('/approval')) {
+        return new Response(JSON.stringify({ approval_id: 'approval-1', accepted: true }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      if (url.endsWith('/api/refactor/stream')) {
+        return new Response('', { status: 200 })
+      }
+      return new Response(
+        JSON.stringify({ available: false, message: '未找到有效 ADC 凭据文件' }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      )
+    })
+    wrapper = mountApp()
+    await flushPromises()
+
+    const webSocket = WebSocketStub.instances[0]!
+    webSocket.onmessage?.({
+      data: JSON.stringify({
+        type: 'approval_request',
+        payload: {
+          approval_id: 'approval-1',
+          file_path: 'CodeSmells/main.py',
+          original_code: 'old',
+          refactored_code: 'new',
+        },
+      }),
+    } as MessageEvent)
+    await wrapper.vm.$nextTick()
+    webSocket.readyState = WebSocketStub.CLOSED
+    await wrapper.get('.btn-approve').trigger('click')
+    await flushPromises()
+
+    const approvalCall = vi
+      .mocked(fetch)
+      .mock.calls.find(([input]) => String(input).includes('/approval'))
+    expect(approvalCall).toBeDefined()
+    expect(JSON.parse(String(approvalCall![1]?.body))).toEqual({
+      session_token: 'session-token',
+      approval_id: 'approval-1',
+      approved: true,
+    })
   })
 })

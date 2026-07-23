@@ -6,6 +6,11 @@ import { VueFlow, MarkerType } from '@vue-flow/core'
 import type { Node, Edge } from '@vue-flow/core'
 import TopologyGraph from './components/TopologyGraph.vue'
 
+const configuredApiBase = import.meta.env.VITE_API_BASE_URL?.trim()
+const API_BASE_URL =
+  configuredApiBase ||
+  (window.location.port === '5173' ? 'http://127.0.0.1:8000' : window.location.origin)
+
 type ThemePreference = 'light' | 'dark' | 'system'
 
 const THEME_STORAGE_KEY = 'refactor_agent_theme'
@@ -50,7 +55,8 @@ const isRefactoring = ref(false)
 const agentLogs = ref<{ type: 'info' | 'success' | 'error'; message: string; time: string }[]>([])
 
 // 阶段 4：会话与多轮对话记忆状态
-const threadId = ref('session_' + Math.random().toString(36).substring(2, 9))
+const threadId = ref('')
+const sessionToken = ref('')
 const userChatInput = ref('')
 const chatMessages = ref<
   { role: 'user' | 'agent' | 'coder' | 'reviewer' | 'architect'; text: string }[]
@@ -170,7 +176,7 @@ loadSavedConfig()
 
 const loadAdcStatus = async () => {
   try {
-    const response = await fetch('http://127.0.0.1:8000/api/models/adc-status')
+    const response = await fetch(`${API_BASE_URL}/api/models/adc-status`)
     if (!response.ok) throw new Error(`HTTP ${response.status}`)
     adcStatus.value = (await response.json()) as AdcStatus
     if (!modelConfig.value.vertex_project_id && adcStatus.value.project_id) {
@@ -200,7 +206,7 @@ const connectModelProvider = async () => {
   connectionFeedback.value = { type: 'idle', message: '' }
 
   try {
-    const response = await fetch('http://127.0.0.1:8000/api/models/connect', {
+    const response = await fetch(`${API_BASE_URL}/api/models/connect`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -244,26 +250,48 @@ const connectModelProvider = async () => {
 const socket = ref<WebSocket | null>(null)
 const isApprovalModalOpen = ref(false)
 const approvalPayload = ref<{
+  approval_id: string
   file_path: string
   original_code: string
   refactored_code: string
 } | null>(null)
 
+const createBackendSession = async () => {
+  const response = await fetch(`${API_BASE_URL}/api/sessions`, { method: 'POST' })
+  if (!response.ok) {
+    throw new Error(`创建后端会话失败（HTTP ${response.status}）`)
+  }
+  const payload = (await response.json()) as {
+    thread_id: string
+    session_token: string
+  }
+  threadId.value = payload.thread_id
+  sessionToken.value = payload.session_token
+}
+
+const ensureBackendSession = async () => {
+  if (!threadId.value || !sessionToken.value) {
+    await createBackendSession()
+    initWebSocket()
+  }
+}
+
 // 初始化 WebSocket 连接并监听
 const initWebSocket = () => {
+  if (!threadId.value || !sessionToken.value) return
   if (socket.value) {
     socket.value.close()
   }
 
-  const wsUrl = `ws://127.0.0.1:8000/ws/refactor/${threadId.value}`
-  console.log(`[WebSocket] Connecting to ${wsUrl}`)
+  const apiUrl = new URL(API_BASE_URL)
+  const wsProtocol = apiUrl.protocol === 'https:' ? 'wss:' : 'ws:'
+  const wsUrl = `${wsProtocol}//${apiUrl.host}/ws/refactor/${encodeURIComponent(threadId.value)}?token=${encodeURIComponent(sessionToken.value)}`
 
   socket.value = new WebSocket(wsUrl)
 
   socket.value.onmessage = (event) => {
     try {
       const data = JSON.parse(event.data)
-      console.log('[WebSocket] Received message:', data)
 
       if (data.type === 'approval_request') {
         // 挂起状态，显示 HITL 审批弹窗
@@ -272,7 +300,13 @@ const initWebSocket = () => {
       } else if (data.type === 'approval_confirmed') {
         // 审批结果确认，隐藏弹窗，发起新的 SSE 重构流请求进行恢复
         isApprovalModalOpen.value = false
-        sendStreamRequest('', false)
+        void sendStreamRequest('', false)
+      } else if (data.type === 'approval_error') {
+        agentLogs.value.push({
+          type: 'error',
+          message: data.message || '审批请求已失效',
+          time: new Date().toLocaleTimeString(),
+        })
       } else if (data.type === 'chatroom_message') {
         // 阶段 3：A2A 多角色群聊，分发消息角色与头像
         const sender = data.sender
@@ -300,44 +334,90 @@ const initWebSocket = () => {
   }
 }
 
-// 批准写入修改
-const handleApprove = () => {
+const submitApprovalDecision = async (approved: boolean) => {
+  if (!approvalPayload.value) return
+
   if (socket.value && socket.value.readyState === WebSocket.OPEN) {
     socket.value.send(
       JSON.stringify({
         type: 'approval_response',
-        approved: true,
+        approval_id: approvalPayload.value.approval_id,
+        approved,
       }),
     )
+    return
+  }
+
+  const response = await fetch(
+    `${API_BASE_URL}/api/sessions/${encodeURIComponent(threadId.value)}/approval`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_token: sessionToken.value,
+        approval_id: approvalPayload.value.approval_id,
+        approved,
+      }),
+    },
+  )
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => ({}))) as { detail?: string }
+    throw new Error(payload.detail || `审批提交失败（HTTP ${response.status}）`)
+  }
+  isApprovalModalOpen.value = false
+  await sendStreamRequest('', false)
+}
+
+// 批准写入修改
+const handleApprove = async () => {
+  try {
+    await submitApprovalDecision(true)
+  } catch (error) {
+    agentLogs.value.push({
+      type: 'error',
+      message: error instanceof Error ? error.message : '审批提交失败',
+      time: new Date().toLocaleTimeString(),
+    })
   }
 }
 
 // 拒绝写入修改并打回
-const handleReject = () => {
-  if (socket.value && socket.value.readyState === WebSocket.OPEN) {
-    socket.value.send(
-      JSON.stringify({
-        type: 'approval_response',
-        approved: false,
-      }),
-    )
-    isApprovalModalOpen.value = false
+const handleReject = async () => {
+  try {
+    await submitApprovalDecision(false)
+  } catch (error) {
+    agentLogs.value.push({
+      type: 'error',
+      message: error instanceof Error ? error.message : '审批提交失败',
+      time: new Date().toLocaleTimeString(),
+    })
   }
 }
 
 // 挂载时启动
-onMounted(() => {
+onMounted(async () => {
   if (typeof window.matchMedia === 'function') {
     systemThemeQuery = window.matchMedia('(prefers-color-scheme: dark)')
     syncSystemTheme()
     systemThemeQuery.addEventListener('change', syncSystemTheme)
   }
-  initWebSocket()
+  try {
+    await createBackendSession()
+    initWebSocket()
+  } catch (error) {
+    agentLogs.value.push({
+      type: 'error',
+      message: error instanceof Error ? error.message : '无法创建后端会话',
+      time: new Date().toLocaleTimeString(),
+    })
+  }
   loadAdcStatus()
 })
 
 onUnmounted(() => {
   systemThemeQuery?.removeEventListener('change', syncSystemTheme)
+  socket.value?.close()
+  socket.value = null
 })
 
 // 阶段 6: 视图切换和拓扑组件引用
@@ -531,17 +611,38 @@ watch(
 )
 
 // 重置会话 (New Session)
-const handleNewSession = () => {
-  threadId.value = 'session_' + Math.random().toString(36).substring(2, 9)
+const handleNewSession = async () => {
+  socket.value?.close()
+  threadId.value = ''
+  sessionToken.value = ''
   refactoredCode.value = ''
   userChatInput.value = ''
   chatMessages.value = []
   agentLogs.value = []
-  initWebSocket()
+  try {
+    await createBackendSession()
+    initWebSocket()
+  } catch (error) {
+    agentLogs.value.push({
+      type: 'error',
+      message: error instanceof Error ? error.message : '无法创建后端会话',
+      time: new Date().toLocaleTimeString(),
+    })
+  }
 }
 
 // 核心流式请求方法
 const sendStreamRequest = async (payloadText: string, isInitialTurn: boolean) => {
+  try {
+    await ensureBackendSession()
+  } catch (error) {
+    agentLogs.value.push({
+      type: 'error',
+      message: error instanceof Error ? error.message : '无法创建后端会话',
+      time: new Date().toLocaleTimeString(),
+    })
+    return
+  }
   isRefactoring.value = true
   if (isInitialTurn) {
     refactoredCode.value = ''
@@ -560,7 +661,7 @@ const sendStreamRequest = async (payloadText: string, isInitialTurn: boolean) =>
   let accumulatedResponse = ''
 
   try {
-    const response = await fetch('http://127.0.0.1:8000/api/refactor/stream', {
+    const response = await fetch(`${API_BASE_URL}/api/refactor/stream`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -568,6 +669,7 @@ const sendStreamRequest = async (payloadText: string, isInitialTurn: boolean) =>
       body: JSON.stringify({
         code: payloadText,
         thread_id: threadId.value,
+        session_token: sessionToken.value,
         model_config: getRuntimeModelConfig(),
       }),
     })
