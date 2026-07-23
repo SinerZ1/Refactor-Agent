@@ -7,7 +7,9 @@ const props = defineProps<{
 }>()
 
 interface TopologyNode {
+  id: string
   name: string
+  qualname: string
   type: string
   file_path: string
 }
@@ -73,7 +75,7 @@ const renderChart = (nodes: TopologyNode[], links: TopologyLink[]) => {
   const formattedNodes = nodes.map((node) => {
     const isClass = node.type === 'Class'
     return {
-      id: node.name,
+      id: node.id,
       name: node.name,
       symbolSize: isClass ? 32 : 22,
       value: node.file_path,
@@ -82,7 +84,7 @@ const renderChart = (nodes: TopologyNode[], links: TopologyLink[]) => {
         color: isClass ? palette.classNode : palette.functionNode,
       },
       tooltip: {
-        formatter: `<strong>${node.name}</strong><br/>类型: ${node.type}<br/>位置: ${node.file_path}`,
+        formatter: `<strong>${node.qualname}</strong><br/>类型: ${node.type}<br/>位置: ${node.file_path}`,
       },
     }
   })

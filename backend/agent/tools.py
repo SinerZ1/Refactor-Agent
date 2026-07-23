@@ -108,7 +108,23 @@ def write_code_file(file_path: str, content: str) -> str:
             os.makedirs(dir_name, exist_ok=True)
         with open(abs_path, "w", encoding="utf-8") as f:
             f.write(content)
-        return f"成功将重构代码写入到文件: {abs_path}"
+
+        # 写文件与索引更新属于同一业务事实：若只更新磁盘，后续 Agent 会从 RAG
+        # 读取旧快照，形成“已修改但仍按旧代码推理”的时间一致性缺陷。
+        index_message = ""
+        try:
+            from code_indexer import index_file
+            from graph_indexer import index_to_neo4j
+
+            symbol_count = index_file(abs_path)
+            neo4j_updated = index_to_neo4j()
+            index_message = (
+                f"；AST 索引已刷新 {symbol_count} 个符号，"
+                f"Neo4j {'已同步' if neo4j_updated else '不可用，已保留 AST 降级模式'}"
+            )
+        except Exception as index_error:
+            index_message = f"；索引刷新失败，请重新构建索引: {index_error}"
+        return f"成功将重构代码写入到文件: {abs_path}{index_message}"
     except GraphInterrupt:
         # 重要：必须重新抛出 GraphInterrupt，否则会被底下的 Exception 捕获
         # 从而导致 LangGraph 的中断挂起机制失效，直接把打断异常当作普通错误返回给大模型

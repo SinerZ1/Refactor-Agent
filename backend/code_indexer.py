@@ -1,96 +1,182 @@
 import ast
-import os
+from pathlib import Path
+from threading import RLock
+from typing import TypedDict
 
-# 全局内存符号索引：用于存储项目里类与函数的定义
-SYMBOL_INDEX = {}
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_SOURCE_ROOT = PROJECT_ROOT / "CodeSmells"
 
 
-def index_directory(directory_path: str = "CodeSmells"):
-    """
-    利用 Python ast (抽象语法树) 静态解析目录下的所有 python 文件，提取类和函数定义
-    """
-    global SYMBOL_INDEX
-    SYMBOL_INDEX.clear()
+class SymbolRecord(TypedDict):
+    id: str
+    name: str
+    qualname: str
+    type: str
+    file_path: str
+    code: str
 
-    # 动态适应工作目录：如果是从 backend 目录下运行，符号目录应该在 ../CodeSmells
-    if not os.path.exists(directory_path):
-        if os.path.exists("../CodeSmells"):
-            directory_path = "../CodeSmells"
-        elif os.path.exists("backend/CodeSmells"):
-            directory_path = "backend/CodeSmells"
-        else:
-            return
 
-    if False:  # 跳过原有的检测逻辑
-        # 兼容单独在 backend 目录下运行的情况
-        if directory_path.startswith("backend/") and os.path.exists(
-            directory_path.replace("backend/", "")
-        ):
-            directory_path = directory_path.replace("backend/", "")
-        else:
-            return
+# 索引使用稳定 symbol_id 作为主键，避免不同类或文件中的同名方法互相覆盖。
+SYMBOL_INDEX: dict[str, SymbolRecord] = {}
+_INDEX_LOCK = RLock()
 
-    for root, _, files in os.walk(directory_path):
-        for file in files:
-            if file.endswith(".py"):
-                file_path = os.path.join(root, file)
-                try:
-                    with open(file_path, "r", encoding="utf-8") as f:
-                        source_code = f.read()
 
-                    # 利用 AST 将代码解析为语法树
-                    tree = ast.parse(source_code)
-                    lines = source_code.splitlines()
+def resolve_source_directory(directory_path: str | Path = "CodeSmells") -> Path:
+    """把调用方给出的源码目录归一化为稳定绝对路径。"""
 
-                    # 遍历语法树中所有节点
-                    for node in ast.walk(tree):
-                        # 仅关注 Class (类定义) 与 Function (函数定义)
-                        if isinstance(node, (ast.ClassDef, ast.FunctionDef)):
-                            start_line = node.lineno
-                            # getattr 兼容旧版本 python 的 end_lineno 属性
-                            end_line = getattr(node, "end_lineno", len(lines))
+    candidate = Path(directory_path)
+    if not candidate.is_absolute():
+        project_candidate = PROJECT_ROOT / candidate
+        backend_candidate = Path(__file__).resolve().parent / candidate
+        candidate = (
+            project_candidate
+            if project_candidate.exists()
+            else backend_candidate
+            if backend_candidate.exists()
+            else project_candidate
+        )
+    return candidate.resolve()
 
-                            symbol_name = node.name
-                            symbol_code = "\n".join(lines[start_line - 1 : end_line])
 
-                            # 建立符号关联索引
-                            SYMBOL_INDEX[symbol_name] = {
-                                "file_path": file_path,
-                                "name": symbol_name,
-                                "type": (
-                                    "Class"
-                                    if isinstance(node, ast.ClassDef)
-                                    else "Function"
-                                ),
-                                "code": symbol_code,
-                            }
-                except Exception as e:
-                    print(f"[Indexer] 静态解析文件 {file_path} 异常: {e}")
+def display_file_path(file_path: Path, source_root: Path) -> str:
+    """优先返回项目相对路径，临时测试目录则相对其源码根目录展示。"""
+
+    resolved_file = file_path.resolve()
+    try:
+        return resolved_file.relative_to(PROJECT_ROOT).as_posix()
+    except ValueError:
+        return (Path(source_root.name) / resolved_file.relative_to(source_root)).as_posix()
+
+
+def symbol_identity(file_path: Path, source_root: Path, qualname: str) -> str:
+    return f"{display_file_path(file_path, source_root)}:{qualname}"
+
+
+class _SymbolVisitor(ast.NodeVisitor):
+    """按词法作用域生成 Python qualified name，而不是依赖易冲突的裸名称。"""
+
+    def __init__(
+        self, file_path: Path, source_root: Path, source_lines: list[str]
+    ) -> None:
+        self.file_path = file_path
+        self.source_root = source_root
+        self.source_lines = source_lines
+        self.scope: list[str] = []
+        self.symbols: list[SymbolRecord] = []
+
+    def _visit_symbol(
+        self, node: ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef
+    ) -> None:
+        qualname = ".".join([*self.scope, node.name])
+        end_line = node.end_lineno or len(self.source_lines)
+        self.symbols.append(
+            {
+                "id": symbol_identity(self.file_path, self.source_root, qualname),
+                "name": node.name,
+                "qualname": qualname,
+                "type": "Class" if isinstance(node, ast.ClassDef) else "Function",
+                "file_path": display_file_path(self.file_path, self.source_root),
+                "code": "\n".join(
+                    self.source_lines[node.lineno - 1 : end_line]
+                ),
+            }
+        )
+        self.scope.append(node.name)
+        self.generic_visit(node)
+        self.scope.pop()
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self._visit_symbol(node)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._visit_symbol(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._visit_symbol(node)
+
+
+def scan_python_file(file_path: Path, source_root: Path) -> list[SymbolRecord]:
+    source_code = file_path.read_text(encoding="utf-8")
+    tree = ast.parse(source_code)
+    visitor = _SymbolVisitor(file_path, source_root, source_code.splitlines())
+    visitor.visit(tree)
+    return visitor.symbols
+
+
+def index_directory(directory_path: str | Path = "CodeSmells") -> int:
+    """重建目录符号索引，并原子替换内存快照。"""
+
+    source_root = resolve_source_directory(directory_path)
+    if not source_root.is_dir():
+        return 0
+
+    next_index: dict[str, SymbolRecord] = {}
+    for file_path in source_root.rglob("*.py"):
+        try:
+            for symbol in scan_python_file(file_path, source_root):
+                next_index[symbol["id"]] = symbol
+        except (OSError, SyntaxError, UnicodeError) as exc:
+            print(f"[Indexer] 静态解析文件 {file_path} 异常: {exc}")
+
+    with _INDEX_LOCK:
+        SYMBOL_INDEX.clear()
+        SYMBOL_INDEX.update(next_index)
+    return len(next_index)
+
+
+def index_file(
+    file_path: str | Path, directory_path: str | Path = "CodeSmells"
+) -> int:
+    """增量替换单文件符号，供 HITL 批准写入后立即刷新 RAG。"""
+
+    source_root = resolve_source_directory(directory_path)
+    resolved_file = Path(file_path).resolve()
+    display_path = display_file_path(resolved_file, source_root)
+    symbols = scan_python_file(resolved_file, source_root)
+
+    with _INDEX_LOCK:
+        stale_ids = [
+            symbol_id
+            for symbol_id, symbol in SYMBOL_INDEX.items()
+            if symbol["file_path"] == display_path
+        ]
+        for symbol_id in stale_ids:
+            SYMBOL_INDEX.pop(symbol_id, None)
+        for symbol in symbols:
+            SYMBOL_INDEX[symbol["id"]] = symbol
+    return len(symbols)
 
 
 def get_symbol_definition_content(symbol_name: str) -> str:
-    """
-    根据符号名(例如类名、函数名)直接精准定位、返回源码。
-    """
-    global SYMBOL_INDEX
+    """按 ID、qualified name 或裸名称检索；同名结果全部返回而不静默覆盖。"""
 
-    # 动态扫描两个默认路径 (兼容根目录启动和 backend 目录下启动)
     if not SYMBOL_INDEX:
-        if os.path.exists("CodeSmells"):
-            index_directory("CodeSmells")
-        elif os.path.exists("../CodeSmells"):
-            index_directory("../CodeSmells")
-        elif os.path.exists("backend/CodeSmells"):
-            index_directory("backend/CodeSmells")
+        index_directory()
 
-    symbol = SYMBOL_INDEX.get(symbol_name)
-    if symbol:
-        return (
-            f"=== [AST RAG RETAINED] 检索到 `{symbol_name}` 的定义与源码如下 ===\n"
-            f"文件路径: {symbol['file_path']}\n"
-            f"类型: {symbol['type']}\n"
-            f"--------------------------------------------------\n"
-            f"{symbol['code']}\n"
-            f"=================================================="
+    query = symbol_name.strip()
+    with _INDEX_LOCK:
+        matches = [
+            symbol
+            for symbol in SYMBOL_INDEX.values()
+            if query in {symbol["id"], symbol["qualname"], symbol["name"]}
+        ]
+
+    if not matches:
+        return f"未能在本地项目的 AST 索引中检索到符号 `{query}` 的声明。"
+
+    sections = []
+    for symbol in sorted(matches, key=lambda item: item["id"]):
+        sections.append(
+            "\n".join(
+                [
+                    f"=== [AST RAG RETAINED] `{symbol['id']}` ===",
+                    f"文件路径: {symbol['file_path']}",
+                    f"限定名称: {symbol['qualname']}",
+                    f"类型: {symbol['type']}",
+                    "--------------------------------------------------",
+                    symbol["code"],
+                    "==================================================",
+                ]
+            )
         )
-    return f"未能在本地项目的 AST 索引中检索到符号 `{symbol_name}` 的声明。"
+    return "\n\n".join(sections)

@@ -1,182 +1,290 @@
 import ast
 import os
+from pathlib import Path
+from typing import Any, TypedDict
 
 from dotenv import load_dotenv
 from neo4j import GraphDatabase
 
+from code_indexer import (
+    display_file_path,
+    resolve_source_directory,
+    symbol_identity,
+)
+
 load_dotenv()
 
-# 从环境变量加载 Neo4j 配置
 NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
 NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
 NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "password")
+NEO4J_PROJECT_ID = os.getenv("NEO4J_PROJECT_ID", "refactor-agent")
+
+
+class GraphSymbol(TypedDict):
+    id: str
+    name: str
+    qualname: str
+    type: str
+    file_path: str
+    code: str
+    node_ref: ast.AST
+
+
+class TopologyData(TypedDict):
+    nodes: list[dict[str, Any]]
+    links: list[dict[str, str]]
+    fallback: bool
 
 
 def get_neo4j_driver():
     try:
         driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
-        # 测试连接
         driver.verify_connectivity()
         return driver
-    except Exception as e:
-        print(f"[Neo4j] 连接失败: {e}. 请确保 Neo4j 正在运行并且配置正确。")
+    except Exception as exc:
+        print(f"[Neo4j] 连接失败: {exc}. 请确保 Neo4j 正在运行并且配置正确。")
         return None
 
 
-def parse_code_to_graph(directory_path: str = "CodeSmells"):
-    """
-    解析指定目录下的 Python 代码，提取符号（类、函数）定义以及它们内部的调用关系。
-    """
-    # 动态适应工作目录
-    if not os.path.exists(directory_path):
-        if os.path.exists("../CodeSmells"):
-            directory_path = "../CodeSmells"
-        elif os.path.exists("backend/CodeSmells"):
-            directory_path = "backend/CodeSmells"
-        else:
-            return [], []
+class _GraphSymbolVisitor(ast.NodeVisitor):
+    def __init__(
+        self, file_path: Path, source_root: Path, source_lines: list[str]
+    ) -> None:
+        self.file_path = file_path
+        self.source_root = source_root
+        self.source_lines = source_lines
+        self.scope: list[str] = []
+        self.symbols: list[GraphSymbol] = []
 
-    symbols = []
-    calls = []
+    def _visit_symbol(
+        self, node: ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef
+    ) -> None:
+        qualname = ".".join([*self.scope, node.name])
+        end_line = node.end_lineno or len(self.source_lines)
+        self.symbols.append(
+            {
+                "id": symbol_identity(self.file_path, self.source_root, qualname),
+                "name": node.name,
+                "qualname": qualname,
+                "type": "Class" if isinstance(node, ast.ClassDef) else "Function",
+                "file_path": display_file_path(self.file_path, self.source_root),
+                "code": "\n".join(
+                    self.source_lines[node.lineno - 1 : end_line]
+                ),
+                "node_ref": node,
+            }
+        )
+        self.scope.append(node.name)
+        self.generic_visit(node)
+        self.scope.pop()
 
-    # 存储符号的字典，用于快速查找 caller 关系
-    symbol_dict = {}
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self._visit_symbol(node)
 
-    # 1. 扫描所有符号
-    for root, _, files in os.walk(directory_path):
-        for file in files:
-            if file.endswith(".py"):
-                file_path = os.path.join(root, file)
-                try:
-                    with open(file_path, "r", encoding="utf-8") as f:
-                        source_code = f.read()
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._visit_symbol(node)
 
-                    tree = ast.parse(source_code)
-                    lines = source_code.splitlines()
-
-                    for node in ast.walk(tree):
-                        if isinstance(node, (ast.ClassDef, ast.FunctionDef)):
-                            start_line = node.lineno
-                            end_line = getattr(node, "end_lineno", len(lines))
-                            symbol_name = node.name
-                            symbol_code = "\n".join(lines[start_line - 1 : end_line])
-                            stype = (
-                                "Class"
-                                if isinstance(node, ast.ClassDef)
-                                else "Function"
-                            )
-
-                            # 收集符号
-                            symbol_info = {
-                                "name": symbol_name,
-                                "type": stype,
-                                "file_path": file_path.replace("\\", "/"),
-                                "code": symbol_code,
-                                "node_ref": node,  # 保存 ast 节点以在下一步寻找调用
-                            }
-                            symbols.append(symbol_info)
-                            symbol_dict[symbol_name] = symbol_info
-                except Exception as e:
-                    print(f"[Graph Indexer] 解析文件 {file_path} 异常: {e}")
-
-    # 2. 扫描符号内部的调用关系
-    for sym in symbols:
-        node = sym["node_ref"]
-        # 遍历当前符号节点内部的所有子节点
-        for child in ast.walk(node):
-            if isinstance(child, ast.Call):
-                # 如果是直接调用函数名，如 foo()
-                if isinstance(child.func, ast.Name):
-                    called_name = child.func.id
-                    if called_name in symbol_dict and called_name != sym["name"]:
-                        calls.append((sym["name"], called_name))
-                # 如果是通过对象调用，如 self.foo() 或 service.foo()
-                elif isinstance(child.func, ast.Attribute):
-                    called_name = child.func.attr
-                    if called_name in symbol_dict and called_name != sym["name"]:
-                        calls.append((sym["name"], called_name))
-
-    # 去重
-    calls = list(set(calls))
-    return symbols, calls
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._visit_symbol(node)
 
 
-def index_to_neo4j(directory_path: str = "CodeSmells"):
-    """
-    静态解析代码，然后将类、函数和调用关系存入 Neo4j
-    """
+class _DirectCallCollector(ast.NodeVisitor):
+    """只收集当前符号直接拥有的调用，跳过嵌套类和函数以免重复归因。"""
+
+    def __init__(self, root: ast.AST) -> None:
+        self.root = root
+        self.calls: list[ast.Call] = []
+
+    def visit_Call(self, node: ast.Call) -> None:
+        self.calls.append(node)
+        self.generic_visit(node)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        if node is self.root:
+            for statement in node.body:
+                if not isinstance(
+                    statement, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+                ):
+                    self.visit(statement)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        if node is self.root:
+            for statement in node.body:
+                self.visit(statement)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        if node is self.root:
+            for statement in node.body:
+                self.visit(statement)
+
+
+def _resolve_callee(
+    caller: GraphSymbol,
+    call: ast.Call,
+    symbols_by_name: dict[str, list[GraphSymbol]],
+) -> str | None:
+    if isinstance(call.func, ast.Name):
+        called_name = call.func.id
+    elif isinstance(call.func, ast.Attribute):
+        called_name = call.func.attr
+    else:
+        return None
+
+    candidates = symbols_by_name.get(called_name, [])
+    if not candidates:
+        return None
+
+    caller_parent = caller["qualname"].rsplit(".", 1)[0]
+    same_scope = [
+        candidate
+        for candidate in candidates
+        if candidate["file_path"] == caller["file_path"]
+        and candidate["qualname"].rsplit(".", 1)[0] == caller_parent
+    ]
+    if len(same_scope) == 1:
+        return same_scope[0]["id"]
+
+    same_file_module = [
+        candidate
+        for candidate in candidates
+        if candidate["file_path"] == caller["file_path"]
+        and "." not in candidate["qualname"]
+    ]
+    if len(same_file_module) == 1:
+        return same_file_module[0]["id"]
+    if len(candidates) == 1:
+        return candidates[0]["id"]
+    return None
+
+
+def parse_code_to_graph(
+    directory_path: str | Path = "CodeSmells",
+) -> tuple[list[GraphSymbol], list[tuple[str, str]]]:
+    """解析符号与直接调用关系，所有节点和边均使用稳定 symbol_id。"""
+
+    source_root = resolve_source_directory(directory_path)
+    if not source_root.is_dir():
+        return [], []
+
+    symbols: list[GraphSymbol] = []
+    for file_path in source_root.rglob("*.py"):
+        try:
+            source_code = file_path.read_text(encoding="utf-8")
+            visitor = _GraphSymbolVisitor(
+                file_path, source_root, source_code.splitlines()
+            )
+            visitor.visit(ast.parse(source_code))
+            symbols.extend(visitor.symbols)
+        except (OSError, SyntaxError, UnicodeError) as exc:
+            print(f"[Graph Indexer] 解析文件 {file_path} 异常: {exc}")
+
+    symbols_by_name: dict[str, list[GraphSymbol]] = {}
+    for symbol in symbols:
+        symbols_by_name.setdefault(symbol["name"], []).append(symbol)
+
+    calls: set[tuple[str, str]] = set()
+    for symbol in symbols:
+        collector = _DirectCallCollector(symbol["node_ref"])
+        collector.visit(symbol["node_ref"])
+        for call in collector.calls:
+            callee_id = _resolve_callee(symbol, call, symbols_by_name)
+            if callee_id and callee_id != symbol["id"]:
+                calls.add((symbol["id"], callee_id))
+    return symbols, sorted(calls)
+
+
+def _replace_project_graph(tx, symbols: list[dict[str, Any]], calls: list[dict]):
+    """在单事务内替换本项目子图，失败时保留旧快照。"""
+
+    tx.run(
+        "MATCH (n:Symbol {project_id: $project_id}) DETACH DELETE n",
+        project_id=NEO4J_PROJECT_ID,
+    )
+    tx.run(
+        """
+        UNWIND $symbols AS symbol
+        MERGE (s:Symbol {project_id: $project_id, id: symbol.id})
+        SET s.name = symbol.name,
+            s.qualname = symbol.qualname,
+            s.type = symbol.type,
+            s.file_path = symbol.file_path,
+            s.code = symbol.code
+        """,
+        project_id=NEO4J_PROJECT_ID,
+        symbols=symbols,
+    )
+    tx.run(
+        """
+        UNWIND $calls AS call
+        MATCH (a:Symbol {project_id: $project_id, id: call.source})
+        MATCH (b:Symbol {project_id: $project_id, id: call.target})
+        MERGE (a)-[:CALLS]->(b)
+        """,
+        project_id=NEO4J_PROJECT_ID,
+        calls=calls,
+    )
+
+
+def index_to_neo4j(directory_path: str | Path = "CodeSmells") -> bool:
     driver = get_neo4j_driver()
     if not driver:
         print("[Neo4j] 跳过图索引写入，因为驱动无法加载。")
         return False
 
     symbols, calls = parse_code_to_graph(directory_path)
-
+    serializable_symbols = [
+        {key: value for key, value in symbol.items() if key != "node_ref"}
+        for symbol in symbols
+    ]
+    serializable_calls = [
+        {"source": source, "target": target} for source, target in calls
+    ]
     try:
         with driver.session() as session:
-            # 1. 清空旧数据（仅清理代码相关的图）
-            session.run("MATCH (n:Symbol) DETACH DELETE n")
-
-            # 2. 写入节点
-            for sym in symbols:
-                session.run(
-                    """
-                    MERGE (s:Symbol {name: $name})
-                    SET s.type = $type,
-                        s.file_path = $file_path,
-                        s.code = $code
-                    """,
-                    name=sym["name"],
-                    type=sym["type"],
-                    file_path=sym["file_path"],
-                    code=sym["code"],
-                )
-
-            # 3. 写入调用边
-            for caller, callee in calls:
-                session.run(
-                    """
-                    MATCH (a:Symbol {name: $caller})
-                    MATCH (b:Symbol {name: $callee})
-                    MERGE (a)-[:CALLS]->(b)
-                    """,
-                    caller=caller,
-                    callee=callee,
-                )
+            session.execute_write(
+                _replace_project_graph, serializable_symbols, serializable_calls
+            )
         print(f"[Neo4j] 成功写入 {len(symbols)} 个符号，{len(calls)} 条调用关系。")
         return True
-    except Exception as e:
-        print(f"[Neo4j] 写入图谱数据失败: {e}")
+    except Exception as exc:
+        print(f"[Neo4j] 写入图谱数据失败: {exc}")
         return False
     finally:
         driver.close()
 
 
-def get_topology_data():
-    """
-    提供给前端的可视化接口：查询 Neo4j 拓扑结构，返回节点和边。
-    """
+def _fallback_topology() -> TopologyData:
+    symbols, calls = parse_code_to_graph()
+    return {
+        "nodes": [
+            {key: symbol[key] for key in ("id", "name", "qualname", "type", "file_path")}
+            for symbol in symbols
+        ],
+        "links": [{"source": source, "target": target} for source, target in calls],
+        "fallback": True,
+    }
+
+
+def get_topology_data() -> TopologyData:
     driver = get_neo4j_driver()
     if not driver:
-        # 降级返回空，或者基于 AST 静态结果构建内存图
-        symbols, calls = parse_code_to_graph()
-        nodes = [
-            {"name": s["name"], "type": s["type"], "file_path": s["file_path"]}
-            for s in symbols
-        ]
-        links = [{"source": c[0], "target": c[1]} for c in calls]
-        return {"nodes": nodes, "links": links, "fallback": True}
+        return _fallback_topology()
 
-    nodes = []
-    links = []
+    nodes: list[dict[str, Any]] = []
+    links: list[dict[str, str]] = []
     try:
         with driver.session() as session:
-            result = session.run("MATCH (n:Symbol) RETURN n")
+            result = session.run(
+                "MATCH (n:Symbol {project_id: $project_id}) RETURN n",
+                project_id=NEO4J_PROJECT_ID,
+            )
             for record in result:
                 node = record["n"]
                 nodes.append(
                     {
+                        "id": node.get("id"),
                         "name": node.get("name"),
+                        "qualname": node.get("qualname"),
                         "type": node.get("type"),
                         "file_path": node.get("file_path"),
                         "code": node.get("code"),
@@ -184,23 +292,22 @@ def get_topology_data():
                 )
 
             result = session.run(
-                "MATCH (a:Symbol)-[r:CALLS]->(b:Symbol) RETURN a.name AS source, b.name AS target"
+                """
+                MATCH (a:Symbol {project_id: $project_id})-[:CALLS]->
+                      (b:Symbol {project_id: $project_id})
+                RETURN a.id AS source, b.id AS target
+                """,
+                project_id=NEO4J_PROJECT_ID,
             )
-            for record in result:
-                links.append({"source": record["source"], "target": record["target"]})
-    except Exception as e:
-        print(f"[Neo4j] 获取拓扑图谱失败: {e}")
-        # 异常情况下也采用 AST 降级
-        symbols, calls = parse_code_to_graph()
-        nodes = [
-            {"name": s["name"], "type": s["type"], "file_path": s["file_path"]}
-            for s in symbols
-        ]
-        links = [{"source": c[0], "target": c[1]} for c in calls]
-        return {"nodes": nodes, "links": links, "fallback": True}
+            links.extend(
+                {"source": record["source"], "target": record["target"]}
+                for record in result
+            )
+    except Exception as exc:
+        print(f"[Neo4j] 获取拓扑图谱失败: {exc}")
+        return _fallback_topology()
     finally:
         driver.close()
-
     return {"nodes": nodes, "links": links, "fallback": False}
 
 
