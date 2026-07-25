@@ -1,48 +1,15 @@
 <script setup lang="ts">
-import { ref, computed, nextTick, watch, onMounted, onUnmounted } from 'vue'
+import { ref, nextTick, watch, onMounted, onUnmounted } from 'vue'
 import '@vue-flow/core/dist/style.css'
 import '@vue-flow/core/dist/theme-default.css'
-import { VueFlow, MarkerType } from '@vue-flow/core'
-import type { Node, Edge } from '@vue-flow/core'
+import { VueFlow } from '@vue-flow/core'
 import TopologyGraph from './components/TopologyGraph.vue'
 import { API_BASE_URL } from './api'
+import { useModelProvider } from './composables/useModelProvider'
+import { useTaskDag } from './composables/useTaskDag'
+import { useTheme } from './composables/useTheme'
 
-type ThemePreference = 'light' | 'dark' | 'system'
-
-const THEME_STORAGE_KEY = 'refactor_agent_theme'
-const storedTheme = localStorage.getItem(THEME_STORAGE_KEY)
-const themePreference = ref<ThemePreference>(
-  storedTheme === 'light' || storedTheme === 'dark' || storedTheme === 'system'
-    ? storedTheme
-    : 'system',
-)
-const systemPrefersDark = ref(false)
-const resolvedTheme = computed<'light' | 'dark'>(() =>
-  themePreference.value === 'system'
-    ? systemPrefersDark.value
-      ? 'dark'
-      : 'light'
-    : themePreference.value,
-)
-const themeOptions: { value: ThemePreference; label: string; icon: string }[] = [
-  { value: 'light', label: '浅色', icon: '☀' },
-  { value: 'dark', label: '深色', icon: '☾' },
-  { value: 'system', label: '跟随系统', icon: '◐' },
-]
-
-let systemThemeQuery: MediaQueryList | null = null
-
-const syncSystemTheme = (event?: MediaQueryListEvent) => {
-  systemPrefersDark.value = event?.matches ?? systemThemeQuery?.matches ?? false
-}
-
-const setThemePreference = (theme: ThemePreference) => {
-  themePreference.value = theme
-}
-
-watch(themePreference, (theme) => {
-  localStorage.setItem(THEME_STORAGE_KEY, theme)
-})
+const { resolvedTheme, setThemePreference, themeOptions, themePreference } = useTheme()
 
 // 基础状态
 const sourceCode = ref('CodeSmells/main.py') // 默认要重构的测试文件路径
@@ -60,189 +27,21 @@ const chatMessages = ref<
   { role: 'user' | 'agent' | 'coder' | 'reviewer' | 'architect'; text: string }[]
 >([])
 
-// 阶段 1：多模型与服务提供商动态配置状态
-type ModelProvider = 'openai' | 'gemini_studio' | 'google_vertex'
-type VertexAuthMode = 'adc' | 'api_key'
-
-interface ModelConfig {
-  provider: ModelProvider
-  base_url: string
-  model_name: string
-  vertex_project_id: string
-  vertex_location: string
-  vertex_model_name: string
-  vertex_auth_mode: VertexAuthMode
-}
-
-interface ConnectionFeedback {
-  type: 'idle' | 'success' | 'error'
-  message: string
-}
-
-interface AdcStatus {
-  available: boolean
-  message: string
-  source?: string | null
-  project_id?: string | null
-  credential_type?: string | null
-}
-
-const modelConfig = ref<ModelConfig>({
-  provider: 'openai',
-  base_url: 'https://api.deepseek.com',
-  model_name: 'deepseek-v4-flash',
-  vertex_project_id: '',
-  vertex_location: 'global',
-  vertex_model_name: 'gemini-3.5-flash',
-  vertex_auth_mode: 'adc',
-})
-
-// API Key 按供应商隔离且仅保存在内存中，避免切换供应商时把一个平台的密钥误发给另一个平台。
-const providerApiKeys = ref<Record<ModelProvider, string>>({
-  openai: '',
-  gemini_studio: '',
-  google_vertex: '',
-})
-const modelOptions = ref<Record<ModelProvider, string[]>>({
-  openai: [],
-  gemini_studio: [],
-  google_vertex: [],
-})
-const isConnectingProvider = ref(false)
-const connectionFeedback = ref<ConnectionFeedback>({ type: 'idle', message: '' })
-const adcStatus = ref<AdcStatus>({ available: false, message: '正在检查 ADC…' })
-
-const currentApiKey = computed({
-  get: () => providerApiKeys.value[modelConfig.value.provider],
-  set: (value: string) => {
-    providerApiKeys.value[modelConfig.value.provider] = value
-  },
-})
-
-const activeModelName = computed({
-  get: () =>
-    modelConfig.value.provider === 'google_vertex'
-      ? modelConfig.value.vertex_model_name
-      : modelConfig.value.model_name,
-  set: (value: string) => {
-    if (modelConfig.value.provider === 'google_vertex') {
-      modelConfig.value.vertex_model_name = value
-    } else {
-      modelConfig.value.model_name = value
-    }
-    saveConfig()
-  },
-})
-
-const activeModelOptions = computed(() => modelOptions.value[modelConfig.value.provider])
-const canConnectProvider = computed(() => {
-  if (modelConfig.value.provider === 'openai') {
-    return Boolean(currentApiKey.value.trim() && modelConfig.value.base_url.trim())
-  }
-  if (modelConfig.value.provider === 'gemini_studio') {
-    return Boolean(currentApiKey.value.trim())
-  }
-  if (modelConfig.value.vertex_auth_mode === 'api_key') {
-    return Boolean(currentApiKey.value.trim())
-  }
-  return adcStatus.value.available
-})
-
-// 从 LocalStorage 加载本地模型配置
-const loadSavedConfig = () => {
-  const saved = localStorage.getItem('refactor_agent_model_config')
-  if (saved) {
-    try {
-      const parsed = JSON.parse(saved) as Partial<ModelConfig> & Record<string, unknown>
-      // 兼容并清理旧版本曾写入 LocalStorage 的 API Key 与本机 ADC 路径。
-      delete parsed.api_key
-      delete parsed.vertex_adc_path
-      modelConfig.value = { ...modelConfig.value, ...parsed }
-    } catch (e) {
-      console.error('加载本地模型配置失败:', e)
-    }
-  }
-}
-
-// 保存配置到 LocalStorage
-const saveConfig = () => {
-  localStorage.setItem('refactor_agent_model_config', JSON.stringify(modelConfig.value))
-}
-
-// 页面加载时载入配置
-loadSavedConfig()
-
-const loadAdcStatus = async () => {
-  try {
-    const response = await fetch(`${API_BASE_URL}/api/models/adc-status`)
-    if (!response.ok) throw new Error(`HTTP ${response.status}`)
-    adcStatus.value = (await response.json()) as AdcStatus
-    if (!modelConfig.value.vertex_project_id && adcStatus.value.project_id) {
-      modelConfig.value.vertex_project_id = adcStatus.value.project_id
-      saveConfig()
-    }
-  } catch {
-    adcStatus.value = { available: false, message: '无法检查 ADC，请确认后端已启动' }
-  }
-}
-
-const handleProviderChange = () => {
-  connectionFeedback.value = { type: 'idle', message: '' }
-  saveConfig()
-  if (modelConfig.value.provider === 'google_vertex') {
-    loadAdcStatus()
-  }
-}
-
-const getRuntimeModelConfig = () => ({
-  ...modelConfig.value,
-  api_key: currentApiKey.value,
-})
-
-const connectModelProvider = async () => {
-  isConnectingProvider.value = true
-  connectionFeedback.value = { type: 'idle', message: '' }
-
-  try {
-    const response = await fetch(`${API_BASE_URL}/api/models/connect`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        provider: modelConfig.value.provider,
-        api_key: currentApiKey.value,
-        base_url: modelConfig.value.base_url,
-        project_id: modelConfig.value.vertex_project_id,
-        location: modelConfig.value.vertex_location,
-        auth_mode: modelConfig.value.vertex_auth_mode,
-      }),
-    })
-    const payload = (await response.json()) as {
-      models?: string[]
-      message?: string
-      detail?: string
-    }
-    if (!response.ok) {
-      throw new Error(payload.detail || `连接失败（HTTP ${response.status}）`)
-    }
-
-    const models = payload.models ?? []
-    modelOptions.value[modelConfig.value.provider] = models
-    if (models.length > 0 && !models.includes(activeModelName.value)) {
-      activeModelName.value = models[0]!
-    }
-    connectionFeedback.value = {
-      type: 'success',
-      message: payload.message || `连接成功，共发现 ${models.length} 个模型`,
-    }
-  } catch (error) {
-    connectionFeedback.value = {
-      type: 'error',
-      message: error instanceof Error ? error.message : '连接失败，请检查配置',
-    }
-  } finally {
-    isConnectingProvider.value = false
-  }
-}
+const {
+  activeModelName,
+  activeModelOptions,
+  adcStatus,
+  canConnectProvider,
+  connectModelProvider,
+  connectionFeedback,
+  currentApiKey,
+  getRuntimeModelConfig,
+  handleProviderChange,
+  isConnectingProvider,
+  loadAdcStatus,
+  modelConfig,
+  saveConfig,
+} = useModelProvider()
 
 // 阶段 2：WebSocket 双向全双工 & 人机协作审批 (HITL)
 const socket = ref<WebSocket | null>(null)
@@ -401,11 +200,6 @@ const handleReject = async () => {
 
 // 挂载时启动
 onMounted(async () => {
-  if (typeof window.matchMedia === 'function') {
-    systemThemeQuery = window.matchMedia('(prefers-color-scheme: dark)')
-    syncSystemTheme()
-    systemThemeQuery.addEventListener('change', syncSystemTheme)
-  }
   try {
     await createBackendSession()
     initWebSocket()
@@ -420,7 +214,6 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
-  systemThemeQuery?.removeEventListener('change', syncSystemTheme)
   cancelActiveStream()
   socket.value?.close()
   socket.value = null
@@ -438,155 +231,7 @@ watch(activeTab, (newTab) => {
   }
 })
 
-// 阶段 4：重构任务 DAG 面板 (Vue Flow 动态状态管理)
-const dagNodes = ref<Node[]>([
-  {
-    id: 'architect_task',
-    label: '📐 架构分析与重构规划',
-    position: { x: 50, y: 180 },
-    class: 'dag-node-pending',
-    data: { status: 'pending', title: 'Architect Task' },
-  },
-  {
-    id: 'models_py',
-    label: '📦 重构 models.py (数据模型)',
-    position: { x: 320, y: 50 },
-    class: 'dag-node-pending',
-    data: { status: 'pending', file: 'models.py' },
-  },
-  {
-    id: 'calculator_py',
-    label: '🧮 重构 Calculator.py (业务计算)',
-    position: { x: 320, y: 180 },
-    class: 'dag-node-pending',
-    data: { status: 'pending', file: 'Calculator.py' },
-  },
-  {
-    id: 'services_py',
-    label: '🛠️ 重构 services.py (系统服务)',
-    position: { x: 320, y: 310 },
-    class: 'dag-node-pending',
-    data: { status: 'pending', file: 'services.py' },
-  },
-  {
-    id: 'main_py',
-    label: '🚀 重构 main.py (入口编排)',
-    position: { x: 590, y: 180 },
-    class: 'dag-node-pending',
-    data: { status: 'pending', file: 'main.py' },
-  },
-  {
-    id: 'reviewer_task',
-    label: '🛡️ Reviewer 自动化单元测试',
-    position: { x: 860, y: 180 },
-    class: 'dag-node-pending',
-    data: { status: 'pending', title: 'Reviewer Task' },
-  },
-])
-
-const dagEdges = ref<Edge[]>([
-  {
-    id: 'e1',
-    source: 'architect_task',
-    target: 'models_py',
-    animated: false,
-    style: { stroke: '#444' },
-    markerEnd: MarkerType.ArrowClosed,
-  },
-  {
-    id: 'e2',
-    source: 'architect_task',
-    target: 'calculator_py',
-    animated: false,
-    style: { stroke: '#444' },
-    markerEnd: MarkerType.ArrowClosed,
-  },
-  {
-    id: 'e3',
-    source: 'architect_task',
-    target: 'services_py',
-    animated: false,
-    style: { stroke: '#444' },
-    markerEnd: MarkerType.ArrowClosed,
-  },
-  {
-    id: 'e4',
-    source: 'models_py',
-    target: 'main_py',
-    animated: false,
-    style: { stroke: '#444' },
-    markerEnd: MarkerType.ArrowClosed,
-  },
-  {
-    id: 'e5',
-    source: 'calculator_py',
-    target: 'main_py',
-    animated: false,
-    style: { stroke: '#444' },
-    markerEnd: MarkerType.ArrowClosed,
-  },
-  {
-    id: 'e6',
-    source: 'services_py',
-    target: 'main_py',
-    animated: false,
-    style: { stroke: '#444' },
-    markerEnd: MarkerType.ArrowClosed,
-  },
-  {
-    id: 'e7',
-    source: 'main_py',
-    target: 'reviewer_task',
-    animated: false,
-    style: { stroke: '#444' },
-    markerEnd: MarkerType.ArrowClosed,
-  },
-])
-
-// 更新单个 DAG 任务节点状态，并同步控制边的流动特效
-const updateDagNodeStatus = (
-  nodeId: string,
-  status: 'pending' | 'in_progress' | 'completed' | 'failed',
-) => {
-  const node = dagNodes.value.find((n) => n.id === nodeId)
-  if (node) {
-    node.data.status = status
-    node.class = `dag-node-${status}`
-
-    // 更新下游连线的动画流动和高亮色彩
-    if (status === 'completed') {
-      dagEdges.value.forEach((edge) => {
-        if (edge.source === nodeId) {
-          edge.animated = true
-          edge.style = { stroke: '#4fc08d', strokeWidth: '3px' }
-          edge.markerEnd = MarkerType.ArrowClosed
-        }
-      })
-    } else if (status === 'failed') {
-      dagEdges.value.forEach((edge) => {
-        if (edge.source === nodeId) {
-          edge.animated = false
-          edge.style = { stroke: '#f44336', strokeWidth: '2px' }
-          edge.markerEnd = MarkerType.ArrowClosed
-        }
-      })
-    }
-  }
-}
-
-// 开启重构流程时重置 DAG 看板状态
-const resetDag = () => {
-  dagNodes.value.forEach((node) => {
-    node.data.status = 'pending'
-    node.class = 'dag-node-pending'
-  })
-  dagEdges.value.forEach((edge) => {
-    edge.animated = false
-    edge.style = { stroke: '#444', strokeWidth: '1.5px' }
-    edge.markerEnd = MarkerType.ArrowClosed
-  })
-  updateDagNodeStatus('architect_task', 'in_progress')
-}
+const { dagEdges, dagNodes, resetDag, updateDagNodeStatus } = useTaskDag()
 
 // 自动滚动控制
 const logContainerRef = ref<HTMLDivElement | null>(null)
