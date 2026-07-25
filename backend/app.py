@@ -47,6 +47,21 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
             "[Startup] Neo4j 初始化图索引失败 "
             f"(若未启动 Neo4j 服务请忽略，系统支持降级运行): {exc}"
         )
+    # Redis 链接判断与持久化方案提示
+    redis_url = os.getenv("REDIS_URL")
+    if redis_url:
+        try:
+            import redis
+
+            client = redis.Redis.from_url(redis_url, socket_timeout=3.0)
+            client.ping()
+            print("[Startup] Redis 连接成功。当前使用的是 RedisSaver 持久化记忆。")
+        except Exception as exc:
+            print(
+                f"[Startup] Redis 连接失败 (URL: {redis_url}): {exc}。系统将降级使用 MemorySaver。"
+            )
+    else:
+        print("[Startup] 未配置 REDIS_URL，当前使用的是 MemorySaver 记忆方案。")
     try:
         yield
     finally:

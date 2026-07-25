@@ -95,15 +95,22 @@ def get_checkpointer():
     redis_url = os.getenv("REDIS_URL")
     if redis_url:
         try:
+            import redis
+
+            client = redis.Redis.from_url(redis_url, socket_timeout=3.0)
+            client.ping()
+
             from langgraph.checkpoint.redis import RedisSaver
 
             saver = RedisSaver.from_conn_string(redis_url)
-            print("[Checkpointer] 成功加载 RedisSaver 持久化记忆。")
+            print("[Checkpointer] Redis 连接成功。成功加载 RedisSaver 持久化记忆。")
             return saver
         except Exception as e:
             print(
-                f"[Checkpointer] 初始化 RedisSaver 失败: {e}。将降级使用 MemorySaver。"
+                f"[Checkpointer] Redis 连接或初始化失败 (URL: {redis_url}): {e}。将降级使用 MemorySaver。"
             )
+    else:
+        print("[Checkpointer] 未配置 REDIS_URL，当前使用的是 MemorySaver 记忆方案。")
     return MemorySaver()
 
 

@@ -55,7 +55,7 @@ def get_message_text(content: Any) -> str:
     OpenAI 或 Anthropic) 的 API 响应结构差异，消息的主体内容 (message.content) 可能会被解析为：
     1. 传统的纯文本字符串 (str)。
     2. 多模态或富文本块列表 (list[dict])，例如包含文本块 `{"type": "text", "text": "..."}` 或工具调用块。
-    
+
     为了在下游节点 (如 Reviewer 协议解析、流式打字机输出或 A2A 聊天室渲染) 中保持代码的鲁棒性 (Robustness)
     并防止“can only concatenate str (not 'list') to str”等类型拼接崩溃 (Type Interoperability Issues)，
     此处通过防御性编程 (Defensive Programming) 设计一个集中的数据降级与序列化提取器。
