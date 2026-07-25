@@ -478,13 +478,14 @@ const sendStreamRequest = async (payloadText: string, isInitialTurn: boolean) =>
         `[重构失败] 无法完成此次对话，请检查后端运行状态。`
     }
   } finally {
-    if (generation !== streamGeneration) return
-    streamAbortController = null
-    isRefactoring.value = false
-    // 流程结束后，自动刷新图谱以展示最新架构关系
-    nextTick(() => {
-      topologyGraphRef.value?.refresh()
-    })
+    if (generation === streamGeneration) {
+      streamAbortController = null
+      isRefactoring.value = false
+      // 流程结束后，自动刷新图谱以展示最新架构关系
+      nextTick(() => {
+        topologyGraphRef.value?.refresh()
+      })
+    }
   }
 }
 
