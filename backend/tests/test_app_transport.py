@@ -50,3 +50,43 @@ def test_get_checkpointer_valid_redis_url(monkeypatch):
 
     saver = get_checkpointer()
     assert saver is fake_saver
+
+
+def test_get_checkpointer_http_url_auto_corrected(monkeypatch):
+    monkeypatch.setenv("REDIS_URL", "http://localhost:6379/")
+
+    class FakeRedisClient:
+        def ping(self):
+            return True
+
+    fake_client = FakeRedisClient()
+    mock_url_called = None
+
+    def fake_from_url(url, *args, **kwargs):
+        nonlocal mock_url_called
+        mock_url_called = url
+        return fake_client
+
+    monkeypatch.setattr("redis.Redis.from_url", fake_from_url)
+
+    class FakeRedisSaver:
+        pass
+
+    fake_saver = FakeRedisSaver()
+    mock_conn_string_called = None
+
+    from langgraph.checkpoint.redis import RedisSaver
+
+    def fake_from_conn_string(cls, url):
+        nonlocal mock_conn_string_called
+        mock_conn_string_called = url
+        return fake_saver
+
+    monkeypatch.setattr(
+        RedisSaver, "from_conn_string", classmethod(fake_from_conn_string)
+    )
+
+    saver = get_checkpointer()
+    assert saver is fake_saver
+    assert mock_url_called == "redis://localhost:6379/"
+    assert mock_conn_string_called == "redis://localhost:6379/"

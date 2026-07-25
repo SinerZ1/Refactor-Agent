@@ -94,6 +94,18 @@ def get_checkpointer():
     """
     redis_url = os.getenv("REDIS_URL")
     if redis_url:
+        # 防御性兼容：若用户误配置为 http:// 或 https://，自动修正为 redis:// 或 rediss://
+        if redis_url.startswith("http://"):
+            redis_url = redis_url.replace("http://", "redis://", 1)
+            print(
+                f"[Warning] 检测到 REDIS_URL 使用了错误协议头 http://，已防御性自动修正为: {redis_url}"
+            )
+        elif redis_url.startswith("https://"):
+            redis_url = redis_url.replace("https://", "rediss://", 1)
+            print(
+                f"[Warning] 检测到 REDIS_URL 使用了错误协议头 https://，已防御性自动修正为: {redis_url}"
+            )
+
         try:
             import redis
 
