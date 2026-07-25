@@ -1,10 +1,11 @@
+from langchain_core.messages import AIMessage
+
 from agent.edges import route_reviewer
 from agent.nodes import (
     finalize_review_failure_node,
     finalize_review_success_node,
     reviewer_protocol_retry_node,
 )
-from langchain_core.messages import AIMessage
 
 
 def _state(content: str, *, retries: int = 0, protocol_errors: int = 0):

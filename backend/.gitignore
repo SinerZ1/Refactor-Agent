@@ -6,6 +6,7 @@ build/
 dist/
 
 # 测试与覆盖率产物
+.cache/
 .coverage
 .coverage.*
 htmlcov/

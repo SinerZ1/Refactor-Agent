@@ -1,33 +1,59 @@
 import asyncio
 import json
 import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Literal
 from urllib.parse import urlsplit
 
 import uvicorn
-from agent.credentials import runtime_credentials
-from agent_core import simple_refactor, stream_refactor
-from code_indexer import index_directory
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from graph_indexer import get_topology_data, index_to_neo4j
 from langchain_core.runnables import RunnableConfig
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
+
+from agent.credentials import runtime_credentials
+from agent_core import simple_refactor, stream_refactor
+from code_indexer import index_directory
+from graph_indexer import get_topology_data, index_to_neo4j
 from model_catalog import (
     ModelCatalogError,
     ModelConnectionConfig,
     inspect_adc_file,
     list_available_models,
 )
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
 from session_registry import (
     ApprovalStateError,
     SessionAuthorizationError,
     runtime_sessions,
 )
 
-app = FastAPI(title="Refactor-Agent Backend")
+main_loop: asyncio.AbstractEventLoop | None = None
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    """在 ASGI 生命周期中构建索引，并保存真正运行服务的事件循环。"""
+
+    global main_loop
+    main_loop = asyncio.get_running_loop()
+    index_directory()
+    try:
+        index_to_neo4j()
+    except Exception as exc:
+        print(
+            "[Startup] Neo4j 初始化图索引失败 "
+            f"(若未启动 Neo4j 服务请忽略，系统支持降级运行): {exc}"
+        )
+    try:
+        yield
+    finally:
+        main_loop = None
+
+
+app = FastAPI(title="Refactor-Agent Backend", lifespan=lifespan)
 
 DEFAULT_ALLOWED_ORIGINS = {
     "http://127.0.0.1:5173",
@@ -145,24 +171,6 @@ async def send_chatroom_message(thread_id: str, sender: str, content: str):
     await manager.send_personal_message(
         {"type": "chatroom_message", "sender": sender, "content": content}, thread_id
     )
-
-
-main_loop = None
-
-
-@app.on_event("startup")
-def startup_event():
-    global main_loop
-    main_loop = asyncio.get_event_loop()
-    # 启动时自动静态扫描 CodeSmells 目录，构建 AST 符号索引
-    index_directory()
-    # 启动时同时将代码库关系索引至 Neo4j 中
-    try:
-        index_to_neo4j()
-    except Exception as e:
-        print(
-            f"[Startup] Neo4j 初始化图索引失败 (若未启动 Neo4j 服务请忽略，系统支持降级运行): {e}"
-        )
 
 
 # 配置 CORS，允许前端应用访问

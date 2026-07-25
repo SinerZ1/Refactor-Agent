@@ -1,16 +1,17 @@
 from types import SimpleNamespace
 
-import agent.tools as agent_tools
 import pytest
+from fastapi import HTTPException
+from langgraph.checkpoint.base import get_checkpoint_metadata
+from pydantic import ValidationError
+
+import agent.tools as agent_tools
 from agent.credentials import (
     CredentialReferenceError,
     EphemeralCredentialVault,
     runtime_credentials,
 )
 from app import RefactorRequest, authorize_refactor_request, build_graph_config
-from fastapi import HTTPException
-from langgraph.checkpoint.base import get_checkpoint_metadata
-from pydantic import ValidationError
 from session_registry import runtime_sessions
 
 

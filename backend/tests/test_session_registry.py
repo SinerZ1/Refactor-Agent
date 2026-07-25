@@ -1,4 +1,5 @@
 import pytest
+
 from session_registry import (
     ApprovalStateError,
     SessionAuthorizationError,

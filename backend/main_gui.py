@@ -17,6 +17,7 @@ from urllib.request import urlopen
 
 import uvicorn
 import webview
+
 from app import app
 
 BACKEND_HOST = "127.0.0.1"

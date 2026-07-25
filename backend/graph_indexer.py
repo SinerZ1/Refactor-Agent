@@ -3,13 +3,14 @@ import os
 from pathlib import Path
 from typing import Any, TypedDict
 
+from dotenv import load_dotenv
+from neo4j import GraphDatabase
+
 from code_indexer import (
     display_file_path,
     resolve_source_directory,
     symbol_identity,
 )
-from dotenv import load_dotenv
-from neo4j import GraphDatabase
 
 load_dotenv()
 
