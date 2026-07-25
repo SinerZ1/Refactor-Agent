@@ -1,11 +1,16 @@
+import difflib
+import hashlib
 import os
 import subprocess
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
-from langchain_core.tools import tool
+from langchain_core.messages import ToolMessage
+from langchain_core.tools import InjectedToolCallId, tool
 from langgraph.errors import GraphInterrupt
-from langgraph.types import interrupt
+from langgraph.types import Command, interrupt
+
+from .state import ChangeRecord
 
 # ============================================================
 # 教学说明: 智能体工具库 (Agent Tooling)
@@ -19,6 +24,7 @@ from langgraph.types import interrupt
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 REFACTOR_ROOT = (PROJECT_ROOT / "CodeSmells").resolve()
 MAX_CODE_FILE_BYTES = 1_000_000
+MAX_REVIEW_DIFF_CHARS = 12_000
 
 
 def get_project_root() -> str:
@@ -61,13 +67,26 @@ def read_code_file(file_path: str) -> str:
 
 
 @tool
-def write_code_file(file_path: str, content: str) -> str:
+def write_code_file(
+    file_path: str,
+    content: str,
+    tool_call_id: Annotated[str, InjectedToolCallId],
+) -> Command:
     """
     将重构后的完整代码写入到指定的本地文件路径中。当重构完成并且需要保存修改时使用。
     """
+
+    def tool_result(message: str, change_record: ChangeRecord | None = None) -> Command:
+        update: dict = {
+            "messages": [ToolMessage(content=message, tool_call_id=tool_call_id)]
+        }
+        if change_record is not None:
+            update["change_records"] = [change_record]
+        return Command(update=update)
+
     try:
         if len(content.encode("utf-8")) > MAX_CODE_FILE_BYTES:
-            return "写入文件失败: 内容超过 1 MB 安全上限"
+            return tool_result("写入文件失败: 内容超过 1 MB 安全上限")
         abs_path = resolve_path(file_path)
         # 获取原文件代码（如果存在），供前端展示 Diff 对比
         original_code = ""
@@ -98,7 +117,7 @@ def write_code_file(file_path: str, content: str) -> str:
             approved = approval_res.get("approved", False)
 
         if not approved:
-            return (
+            return tool_result(
                 f"写入文件 `{abs_path}` 失败：用户在人机协作审批中点击拒绝，打回修改。"
             )
 
@@ -124,13 +143,64 @@ def write_code_file(file_path: str, content: str) -> str:
             )
         except Exception as index_error:
             index_message = f"；索引刷新失败，请重新构建索引: {index_error}"
-        return f"成功将重构代码写入到文件: {abs_path}{index_message}"
+        change_record = build_change_record(abs_path, original_code, content)
+        return tool_result(
+            f"成功将重构代码写入到文件: {abs_path}{index_message}",
+            change_record,
+        )
     except GraphInterrupt:
         # 重要：必须重新抛出 GraphInterrupt，否则会被底下的 Exception 捕获
         # 从而导致 LangGraph 的中断挂起机制失效，直接把打断异常当作普通错误返回给大模型
         raise
     except Exception as e:
-        return f"写入文件失败: {str(e)}"
+        return tool_result(f"写入文件失败: {str(e)}")
+
+
+def build_change_record(
+    absolute_path: str, original_code: str, refactored_code: str
+) -> ChangeRecord:
+    """构造 Reviewer 所需的结构化差异，不赋予其任意文件读取能力。
+
+    这相当于把 ToolResponse 中的“写入成功”升级为可审计事件：哈希证明前后版本，
+    unified diff 支持逻辑审查。diff 设置上限是持久化成本与审查完整度之间的权衡；
+    截断会被显式标记，Reviewer 仍可据此要求 Developer 拆分修改。
+    """
+
+    relative_path = Path(absolute_path).resolve().relative_to(PROJECT_ROOT).as_posix()
+    before_lines = original_code.splitlines()
+    after_lines = refactored_code.splitlines()
+    diff_lines = list(
+        difflib.unified_diff(
+            before_lines,
+            after_lines,
+            fromfile=f"a/{relative_path}",
+            tofile=f"b/{relative_path}",
+            lineterm="",
+        )
+    )
+    added_lines = sum(
+        line.startswith("+") and not line.startswith("+++") for line in diff_lines
+    )
+    removed_lines = sum(
+        line.startswith("-") and not line.startswith("---") for line in diff_lines
+    )
+    full_diff = "\n".join(diff_lines)
+    diff_truncated = len(full_diff) > MAX_REVIEW_DIFF_CHARS
+    if diff_truncated:
+        full_diff = (
+            full_diff[:MAX_REVIEW_DIFF_CHARS]
+            + "\n... [diff 已截断，请结合测试结果审查]"
+        )
+
+    return {
+        "file_path": relative_path,
+        "before_sha256": hashlib.sha256(original_code.encode("utf-8")).hexdigest(),
+        "after_sha256": hashlib.sha256(refactored_code.encode("utf-8")).hexdigest(),
+        "added_lines": added_lines,
+        "removed_lines": removed_lines,
+        "unified_diff": full_diff,
+        "diff_truncated": diff_truncated,
+    }
 
 
 @tool

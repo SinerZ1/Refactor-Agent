@@ -27,6 +27,7 @@ def simple_refactor(code: str, config: RunnableConfig | None = None) -> str:
         "retry_count": 0,
         "review_protocol_errors": 0,
         "review_status": "running",
+        "change_records": [],
     }
     try:
         final_state = app_graph.invoke(initial_state, run_config)
@@ -71,6 +72,7 @@ def stream_refactor(
                 retry_count=0,
                 review_protocol_errors=0,
                 review_status="running",
+                change_records=[],
             )
         else:
             stream_input = State(
@@ -78,6 +80,7 @@ def stream_refactor(
                 retry_count=0,
                 review_protocol_errors=0,
                 review_status="running",
+                change_records=[],
             )
 
     try:
