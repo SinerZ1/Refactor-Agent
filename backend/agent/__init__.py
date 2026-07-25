@@ -7,7 +7,7 @@ from langchain_core.messages import HumanMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command
 
-from .state import State
+from .state import State, get_message_text
 from .workflow import app_graph
 
 # 显式导出
@@ -31,7 +31,7 @@ def simple_refactor(code: str, config: RunnableConfig | None = None) -> str:
     }
     try:
         final_state = app_graph.invoke(initial_state, run_config)
-        return final_state["messages"][-1].content
+        return get_message_text(final_state["messages"][-1].content)
     except Exception as e:
         return f"# [运行失败]\n# 错误信息: {str(e)}"
 
@@ -98,7 +98,7 @@ def stream_refactor(
                 ]:
                     # 工具执行节点完毕，向前端推送运行日志
                     for msg in node_output.get("messages", []):
-                        yield f"[SUCCESS] 工具 `{msg.name}` 运行结果:\n{msg.content}\n"
+                        yield f"[SUCCESS] 工具 `{msg.name}` 运行结果:\n{get_message_text(msg.content)}\n"
                 elif node_name in ["architect", "developer", "reviewer"]:
                     # Agent 运行，检测是否触发工具调用
                     prefix = f"\n=== 【{node_name.upper()} 正在发言】 ===\n"
@@ -117,13 +117,14 @@ def stream_refactor(
                                     else "ArchitectAgent"
                                 )
                             )
+                            msg_text = get_message_text(msg.content)
                             if ws_callback:
                                 try:
                                     loop = main_loop
                                     if loop and loop.is_running():
                                         asyncio.run_coroutine_threadsafe(
                                             ws_callback(
-                                                thread_id, sender_name, msg.content
+                                                thread_id, sender_name, msg_text
                                             ),
                                             loop,
                                         )
@@ -133,7 +134,7 @@ def stream_refactor(
                                     )
 
                             # 最终回答，使用打字机流式效果输出
-                            text_content = prefix + msg.content + "\n"
+                            text_content = prefix + msg_text + "\n"
                             chunk_size = 12
                             for i in range(0, len(text_content), chunk_size):
                                 yield text_content[i : i + chunk_size]
@@ -143,7 +144,7 @@ def stream_refactor(
                     yield "\n[INFO] Reviewer 未返回规定的终态标记，正在请求其修正结论...\n"
                 elif node_name == "finalize_review_failure":
                     for msg in node_output.get("messages", []):
-                        yield f"\n{msg.content}\n"
+                        yield f"\n{get_message_text(msg.content)}\n"
                 elif node_name == "__interrupt__":
                     yield "\n[SYSTEM] 触发人机协作审查 (HITL)，请在弹窗中确认文件写入操作...\n"
     except Exception as e:

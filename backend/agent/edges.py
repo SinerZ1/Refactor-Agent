@@ -1,6 +1,6 @@
 from langchain_core.messages import AIMessage, BaseMessage
 
-from .state import State
+from .state import State, get_message_text
 
 MAX_DEVELOPER_RETRIES = 3
 MAX_REVIEW_PROTOCOL_ERRORS = 2
@@ -53,7 +53,7 @@ def route_reviewer(state: State):
     if _has_tool_calls(last_message):
         return "reviewer_tools"
 
-    content = last_message.content or ""
+    content = get_message_text(last_message.content)
     if "【REFACTOR_FAIL】" in content:
         retries = state.get("retry_count", 0)
         if retries < MAX_DEVELOPER_RETRIES:

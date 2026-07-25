@@ -11,7 +11,7 @@ from .credentials import runtime_credentials
 from .prompts import ARCHITECT_PROMPT, DEVELOPER_PROMPT, REVIEWER_PROMPT
 
 # 使用相对导入保证子包高内聚、易移植
-from .state import ChangeRecord, State
+from .state import ChangeRecord, State, get_message_text
 from .tools import architect_tools, developer_tools, reviewer_tools
 
 # ============================================================
@@ -240,7 +240,7 @@ def finalize_review_success_node(_state):
 def finalize_review_failure_node(state: State):
     """在重试耗尽或协议连续失配时生成明确失败终态。"""
 
-    last_content = str(state["messages"][-1].content or "")
+    last_content = get_message_text(state["messages"][-1].content)
     if "【REFACTOR_FAIL】" in last_content:
         reason = "Developer 已达到最多 3 次重试，工作流终止。"
     else:

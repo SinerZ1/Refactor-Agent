@@ -520,9 +520,7 @@ const handleSendChatMessage = () => {
         <div class="brand-copy">
           <div class="brand-title-row">
             <h1>Refactor Agent</h1>
-            <span class="stage-badge">阶段 6</span>
           </div>
-          <p>多智能体协同重构工作台 · LangGraph × Neo4j</p>
         </div>
       </div>
 
