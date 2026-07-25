@@ -1,11 +1,16 @@
 import os
 
-from langgraph.checkpoint.memory import MemorySaver
-from langgraph.graph import END, START, StateGraph
-from langgraph.prebuilt import ToolNode
+from dotenv import load_dotenv
 
-from .edges import route_architect, route_developer, route_reviewer
-from .nodes import (
+# 确保在工作流定义与 checkpointer 初始化前加载环境变量
+load_dotenv()
+
+from langgraph.checkpoint.memory import MemorySaver  # noqa: E402
+from langgraph.graph import END, START, StateGraph  # noqa: E402
+from langgraph.prebuilt import ToolNode  # noqa: E402
+
+from .edges import route_architect, route_developer, route_reviewer  # noqa: E402
+from .nodes import (  # noqa: E402
     call_architect,
     call_developer,
     call_reviewer,
@@ -16,8 +21,8 @@ from .nodes import (
 )
 
 # 使用高内聚相对导入，解耦子包结构
-from .state import State
-from .tools import architect_tools, developer_tools, reviewer_tools
+from .state import State  # noqa: E402
+from .tools import architect_tools, developer_tools, reviewer_tools  # noqa: E402
 
 # ============================================================
 # 教学说明: 状态图装配层 (StateGraph Assembly) 与持久化 Checkpointer
@@ -114,7 +119,7 @@ def get_checkpointer():
 
             from langgraph.checkpoint.redis import RedisSaver
 
-            saver = RedisSaver.from_conn_string(redis_url)
+            saver = RedisSaver(redis_url=redis_url)
             print("[Checkpointer] Redis 连接成功。成功加载 RedisSaver 持久化记忆。")
             return saver
         except Exception as e:

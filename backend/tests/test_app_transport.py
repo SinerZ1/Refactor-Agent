@@ -42,10 +42,13 @@ def test_get_checkpointer_valid_redis_url(monkeypatch):
         pass
 
     fake_saver = FakeRedisSaver()
-    from langgraph.checkpoint.redis import RedisSaver
+
+    import langgraph.checkpoint.redis
 
     monkeypatch.setattr(
-        RedisSaver, "from_conn_string", classmethod(lambda cls, url: fake_saver)
+        langgraph.checkpoint.redis,
+        "RedisSaver",
+        lambda redis_url=None, **kwargs: fake_saver,
     )
 
     saver = get_checkpointer()
@@ -75,15 +78,15 @@ def test_get_checkpointer_http_url_auto_corrected(monkeypatch):
     fake_saver = FakeRedisSaver()
     mock_conn_string_called = None
 
-    from langgraph.checkpoint.redis import RedisSaver
-
-    def fake_from_conn_string(cls, url):
+    def fake_redis_saver_factory(redis_url=None, **kwargs):
         nonlocal mock_conn_string_called
-        mock_conn_string_called = url
+        mock_conn_string_called = redis_url
         return fake_saver
 
+    import langgraph.checkpoint.redis
+
     monkeypatch.setattr(
-        RedisSaver, "from_conn_string", classmethod(fake_from_conn_string)
+        langgraph.checkpoint.redis, "RedisSaver", fake_redis_saver_factory
     )
 
     saver = get_checkpointer()

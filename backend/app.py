@@ -7,6 +7,7 @@ from typing import Literal
 from urllib.parse import urlsplit
 
 import uvicorn
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -30,6 +31,9 @@ from session_registry import (
     runtime_sessions,
 )
 
+# 保证服务入口最早加载环境变量，便于状态图 Checkpointer 等子模块初始化
+load_dotenv()
+
 main_loop: asyncio.AbstractEventLoop | None = None
 
 
@@ -47,33 +51,6 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
             "[Startup] Neo4j 初始化图索引失败 "
             f"(若未启动 Neo4j 服务请忽略，系统支持降级运行): {exc}"
         )
-    # Redis 链接判断与持久化方案提示
-    redis_url = os.getenv("REDIS_URL")
-    if redis_url:
-        # 防御性兼容：若用户误配置为 http:// 或 https://，自动修正为 redis:// 或 rediss://
-        if redis_url.startswith("http://"):
-            redis_url = redis_url.replace("http://", "redis://", 1)
-            print(
-                f"[Warning] 检测到 REDIS_URL 使用了错误协议头 http://，已防御性自动修正为: {redis_url}"
-            )
-        elif redis_url.startswith("https://"):
-            redis_url = redis_url.replace("https://", "rediss://", 1)
-            print(
-                f"[Warning] 检测到 REDIS_URL 使用了错误协议头 https://，已防御性自动修正为: {redis_url}"
-            )
-
-        try:
-            import redis
-
-            client = redis.Redis.from_url(redis_url, socket_timeout=3.0)
-            client.ping()
-            print("[Startup] Redis 连接成功。当前使用的是 RedisSaver 持久化记忆。")
-        except Exception as exc:
-            print(
-                f"[Startup] Redis 连接失败 (URL: {redis_url}): {exc}。系统将降级使用 MemorySaver。"
-            )
-    else:
-        print("[Startup] 未配置 REDIS_URL，当前使用的是 MemorySaver 记忆方案。")
     try:
         yield
     finally:
