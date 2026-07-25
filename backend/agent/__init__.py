@@ -1,30 +1,35 @@
 import asyncio
 import json
+from collections.abc import Callable, Coroutine, Iterator
+from typing import Any
 
 from langchain_core.messages import HumanMessage
+from langchain_core.runnables import RunnableConfig
+from langgraph.types import Command
 
+from .state import State
 from .workflow import app_graph
 
 # 显式导出
 __all__ = ["app_graph", "simple_refactor", "stream_refactor"]
 
 
-def simple_refactor(code: str, config: dict = None) -> str:
+def simple_refactor(code: str, config: RunnableConfig | None = None) -> str:
     """
     同步阻塞重构 (兼容旧接口)
     """
-    run_config = config or {"configurable": {"thread_id": "default_sync_session"}}
+    run_config: RunnableConfig = config or {
+        "configurable": {"thread_id": "default_sync_session"}
+    }
     input_msg = HumanMessage(content=f"请帮我处理以下代码或路径：\n\n{code}")
+    initial_state: State = {
+        "messages": [input_msg],
+        "retry_count": 0,
+        "review_protocol_errors": 0,
+        "review_status": "running",
+    }
     try:
-        final_state = app_graph.invoke(
-            {
-                "messages": [input_msg],
-                "retry_count": 0,
-                "review_protocol_errors": 0,
-                "review_status": "running",
-            },
-            run_config,
-        )
+        final_state = app_graph.invoke(initial_state, run_config)
         return final_state["messages"][-1].content
     except Exception as e:
         return f"# [运行失败]\n# 错误信息: {str(e)}"
@@ -33,26 +38,25 @@ def simple_refactor(code: str, config: dict = None) -> str:
 def stream_refactor(
     code: str,
     thread_id: str = "default_session",
-    config: dict = None,
-    ws_callback=None,
-    main_loop=None,
-):
+    config: RunnableConfig | None = None,
+    ws_callback: Callable[[str, str, str], Coroutine[Any, Any, Any]] | None = None,
+    main_loop: asyncio.AbstractEventLoop | None = None,
+) -> Iterator[str]:
     """
     使用 LangGraph 状态图执行多轮对话流式生成器
     """
     # 构造配置，如果传入了更丰富的运行时配置，在这里进行 merge
-    run_config = {"configurable": {"thread_id": thread_id}}
+    run_config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
     if config and "configurable" in config:
         run_config["configurable"].update(config["configurable"])
 
     current_state = app_graph.get_state(run_config)
 
     # 阶段 2：检测是否处于挂起（Interrupt）状态，并根据是否有 resume_value 执行恢复运行
+    stream_input: State | Command[Any]
     if current_state.interrupts:
         resume_value = run_config["configurable"].get("resume_value")
         if resume_value is not None:
-            from langgraph.types import Command
-
             stream_input = Command(resume=resume_value)
         else:
             # 如果处于挂起状态但未传 approval 状态，则终止流，防止重复触发
@@ -60,21 +64,21 @@ def stream_refactor(
             return
     else:
         if not current_state.values or not current_state.values.get("messages"):
-            stream_input = {
-                "messages": [
+            stream_input = State(
+                messages=[
                     HumanMessage(content=f"请帮我处理以下代码或路径：\n\n{code}")
                 ],
-                "retry_count": 0,
-                "review_protocol_errors": 0,
-                "review_status": "running",
-            }
+                retry_count=0,
+                review_protocol_errors=0,
+                review_status="running",
+            )
         else:
-            stream_input = {
-                "messages": [HumanMessage(content=code)],
-                "retry_count": 0,
-                "review_protocol_errors": 0,
-                "review_status": "running",
-            }
+            stream_input = State(
+                messages=[HumanMessage(content=code)],
+                retry_count=0,
+                review_protocol_errors=0,
+                review_status="running",
+            )
 
     try:
         # 传入初始消息字典、多轮追问消息或恢复 Command 进行流式迭代

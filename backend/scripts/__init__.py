@@ -65,10 +65,11 @@ def sort_imports():
 
 
 def check_mypy():
+    # CodeSmells 是教学用反例语料，故意保留动态全局状态等坏味道。类型门禁只覆盖
+    # 可部署后端，避免为了让工具变绿而“修好”课程样本、削弱重构演示价值。
     run_command(
         [
             "mypy",
-            "CodeSmells",
             "backend/agent",
             "backend/app.py",
             "backend/code_indexer.py",

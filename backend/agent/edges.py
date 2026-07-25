@@ -1,3 +1,5 @@
+from langchain_core.messages import AIMessage, BaseMessage
+
 from .state import State
 
 MAX_DEVELOPER_RETRIES = 3
@@ -13,12 +15,18 @@ MAX_REVIEW_PROTOCOL_ERRORS = 2
 # ============================================================
 
 
+def _has_tool_calls(message: BaseMessage) -> bool:
+    """工具调用只可能由模型的 AIMessage 发起，避免把协议字段假定到所有消息类型。"""
+
+    return isinstance(message, AIMessage) and bool(message.tool_calls)
+
+
 def route_architect(state: State):
     """
     根据 Architect 的最后一条消息决定是调用其绑定的工具，还是流转到 Developer
     """
     last_message = state["messages"][-1]
-    if last_message.tool_calls:
+    if _has_tool_calls(last_message):
         return "architect_tools"
     return "developer"
 
@@ -28,7 +36,7 @@ def route_developer(state: State):
     根据 Developer 的最后一条消息决定是调用写文件等工具，还是流转到 Reviewer 审查
     """
     last_message = state["messages"][-1]
-    if last_message.tool_calls:
+    if _has_tool_calls(last_message):
         return "developer_tools"
     return "reviewer"
 
@@ -42,7 +50,7 @@ def route_reviewer(state: State):
     - 如果缺少协议标记，有限次要求 Reviewer 修正，避免无限循环或静默成功。
     """
     last_message = state["messages"][-1]
-    if last_message.tool_calls:
+    if _has_tool_calls(last_message):
         return "reviewer_tools"
 
     content = last_message.content or ""

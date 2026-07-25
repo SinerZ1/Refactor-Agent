@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from graph_indexer import get_topology_data, index_to_neo4j
+from langchain_core.runnables import RunnableConfig
 from model_catalog import (
     ModelCatalogError,
     ModelConnectionConfig,
@@ -254,7 +255,7 @@ class ApprovalDecisionResponse(BaseModel):
 
 def build_graph_config(
     request: RefactorRequest,
-) -> tuple[dict[str, dict[str, object]], str | None]:
+) -> tuple[RunnableConfig, str | None]:
     """构造可持久化的图配置，并把真正密钥替换成随机引用。"""
 
     configurable: dict[str, object] = {"thread_id": request.thread_id}
