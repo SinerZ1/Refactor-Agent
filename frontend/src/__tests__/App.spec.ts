@@ -290,4 +290,27 @@ describe('App', () => {
     expect(wrapper.get('.session-id').text()).toBe('session_2')
     expect(wrapper.findAll('.log-item.error')).toHaveLength(0)
   })
+
+  it('renders markdown formatted content in chat messages correctly', async () => {
+    wrapper = mountApp()
+    await flushPromises()
+
+    const webSocket = WebSocketStub.instances[0]!
+    webSocket.onmessage?.({
+      data: JSON.stringify({
+        type: 'chatroom_message',
+        sender: 'CoderAgent',
+        content:
+          '**重构建议**: 请使用 `calculate()` 函数。\n```python\ndef calculate():\n    return 42\n```',
+      }),
+    } as MessageEvent)
+    await wrapper.vm.$nextTick()
+
+    const bubbleMarkdown = wrapper.find('.bubble-markdown')
+    expect(bubbleMarkdown.exists()).toBe(true)
+    expect(bubbleMarkdown.html()).toContain('<strong>重构建议</strong>')
+    expect(bubbleMarkdown.html()).toContain('<code>calculate()</code>')
+    expect(bubbleMarkdown.find('pre code').exists()).toBe(true)
+    expect(bubbleMarkdown.find('pre code').text()).toContain('def calculate()')
+  })
 })

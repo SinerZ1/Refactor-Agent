@@ -1,11 +1,22 @@
 <script setup lang="ts">
 import { defineAsyncComponent, ref, nextTick, watch, onMounted, onUnmounted } from 'vue'
+import { Marked } from 'marked'
 import '@vue-flow/core/dist/style.css'
 import '@vue-flow/core/dist/theme-default.css'
 import { API_BASE_URL } from './api'
 import { useModelProvider } from './composables/useModelProvider'
 import { useTaskDag } from './composables/useTaskDag'
 import { useTheme } from './composables/useTheme'
+
+const markedInstance = new Marked({
+  gfm: true,
+  breaks: true,
+})
+
+const renderMarkdown = (text: string) => {
+  if (!text) return ''
+  return markedInstance.parse(text) as string
+}
 
 // 两个图形面板都不属于默认代码视图。异步组件使 ECharts/Vue Flow 在用户首次
 // 打开对应标签时才下载，避免把图形引擎计入工作区首屏关键路径。
@@ -781,7 +792,7 @@ const handleSendChatMessage = () => {
                 <span v-else-if="msg.role === 'architect'">📐 ArchitectAgent (Architect)</span>
                 <span v-else>🤖 {{ msg.role }}</span>
               </div>
-              <pre class="bubble-text">{{ msg.text }}</pre>
+              <div class="bubble-markdown" v-html="renderMarkdown(msg.text)"></div>
             </div>
           </div>
 
@@ -1216,13 +1227,88 @@ const handleSendChatMessage = () => {
   align-self: flex-end;
 }
 
-.bubble-text {
+.bubble-markdown {
   margin: 0;
-  white-space: pre-wrap;
-  word-break: break-all;
-  font-family: inherit;
+  word-break: break-word;
   font-size: 13.5px;
+  line-height: 1.5;
+}
+
+:deep(.bubble-markdown p) {
+  margin: 0 0 0.5em;
+}
+
+:deep(.bubble-markdown p:last-child) {
+  margin-bottom: 0;
+}
+
+:deep(.bubble-markdown pre) {
+  background-color: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  padding: 0.6rem 0.8rem;
+  margin: 0.5em 0;
+  overflow-x: auto;
+  font-family: 'Fira Code', 'Courier New', monospace;
+  font-size: 12.5px;
   line-height: 1.4;
+}
+
+:deep(.bubble-markdown code) {
+  font-family: 'Fira Code', 'Courier New', monospace;
+  font-size: 0.9em;
+  background-color: rgba(0, 0, 0, 0.2);
+  padding: 0.15em 0.35em;
+  border-radius: 4px;
+}
+
+:deep(.bubble-markdown pre code) {
+  background-color: transparent;
+  padding: 0;
+  border-radius: 0;
+}
+
+:deep(.bubble-markdown ul),
+:deep(.bubble-markdown ol) {
+  margin: 0.4em 0;
+  padding-left: 1.4em;
+}
+
+:deep(.bubble-markdown li) {
+  margin-bottom: 0.2em;
+}
+
+:deep(.bubble-markdown blockquote) {
+  margin: 0.5em 0;
+  padding: 0.4em 0.8em;
+  border-left: 3px solid #4fc08d;
+  background-color: rgba(255, 255, 255, 0.05);
+  color: inherit;
+  opacity: 0.85;
+}
+
+:deep(.bubble-markdown table) {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 0.5em 0;
+  font-size: 12.5px;
+}
+
+:deep(.bubble-markdown th),
+:deep(.bubble-markdown td) {
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  padding: 0.35rem 0.6rem;
+  text-align: left;
+}
+
+:deep(.bubble-markdown th) {
+  background-color: rgba(0, 0, 0, 0.2);
+  font-weight: bold;
+}
+
+:deep(.bubble-markdown a) {
+  color: #4fc08d;
+  text-decoration: underline;
 }
 
 .chat-footer {
@@ -2242,7 +2328,7 @@ select:focus-visible {
   color: rgba(255, 255, 255, 0.8);
 }
 
-.bubble-text {
+.bubble-markdown {
   color: inherit;
   font-size: 13.5px;
   line-height: 1.55;
