@@ -62,8 +62,19 @@ test('connects a model provider without persisting its API key', async ({ page }
 
   await expect(page.locator('.connection-feedback')).toContainText('连接成功')
   await expect(page.locator('input[list="available-model-options"]')).toHaveValue('deepseek-e2e')
-  const savedConfig = await page.evaluate(() =>
-    localStorage.getItem('refactor_agent_model_config'),
-  )
+  const savedConfig = await page.evaluate(() => localStorage.getItem('refactor_agent_model_config'))
   expect(savedConfig).not.toContain('e2e-secret')
+})
+
+test('loads graph workspaces only after their tabs are selected', async ({ page }) => {
+  await page.goto('/')
+
+  await expect(page.locator('.topology-container')).toHaveCount(0)
+
+  await page.getByRole('button', { name: '任务 DAG' }).click()
+  await expect(page.locator('.vue-flow')).toBeVisible()
+
+  await page.getByRole('button', { name: '依赖图谱' }).click()
+  await expect(page.getByText('代码架构拓扑图谱')).toBeVisible()
+  await expect(page.getByText('AST 降级模式')).toBeVisible()
 })

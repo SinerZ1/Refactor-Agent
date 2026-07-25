@@ -1,7 +1,22 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, nextTick, watch } from 'vue'
-import * as echarts from 'echarts'
+import { GraphChart, type GraphSeriesOption } from 'echarts/charts'
+import {
+  LegendComponent,
+  TooltipComponent,
+  type LegendComponentOption,
+  type TooltipComponentOption,
+} from 'echarts/components'
+import { init, use, type ComposeOption, type ECharts } from 'echarts/core'
+import { CanvasRenderer } from 'echarts/renderers'
 import { API_BASE_URL } from '../api'
+
+// ECharts 的默认入口会把所有图表和渲染器打入首屏包。这里按拓扑图真实能力注册，
+// 既保留 force graph，又让 Vite/Rolldown 能删除项目从未使用的图表实现。
+use([GraphChart, LegendComponent, TooltipComponent, CanvasRenderer])
+type TopologyChartOption = ComposeOption<
+  GraphSeriesOption | LegendComponentOption | TooltipComponentOption
+>
 
 const props = defineProps<{
   theme: 'light' | 'dark'
@@ -26,7 +41,7 @@ interface TopologyData {
 }
 
 const graphRef = ref<HTMLDivElement | null>(null)
-let myChart: echarts.ECharts | null = null
+let myChart: ECharts | null = null
 let latestTopology: TopologyData | null = null
 
 const loading = ref(false)
@@ -69,7 +84,7 @@ const renderChart = (nodes: TopologyNode[], links: TopologyLink[]) => {
   }
 
   if (!myChart) {
-    myChart = echarts.init(graphRef.value)
+    myChart = init(graphRef.value)
   }
 
   // 格式化节点数据
@@ -102,7 +117,7 @@ const renderChart = (nodes: TopologyNode[], links: TopologyLink[]) => {
     }
   })
 
-  const option: echarts.EChartsOption = {
+  const option: TopologyChartOption = {
     tooltip: {
       trigger: 'item',
       backgroundColor: palette.tooltipBackground,

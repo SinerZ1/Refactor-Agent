@@ -1,13 +1,18 @@
 <script setup lang="ts">
-import { ref, nextTick, watch, onMounted, onUnmounted } from 'vue'
+import { defineAsyncComponent, ref, nextTick, watch, onMounted, onUnmounted } from 'vue'
 import '@vue-flow/core/dist/style.css'
 import '@vue-flow/core/dist/theme-default.css'
-import { VueFlow } from '@vue-flow/core'
-import TopologyGraph from './components/TopologyGraph.vue'
 import { API_BASE_URL } from './api'
 import { useModelProvider } from './composables/useModelProvider'
 import { useTaskDag } from './composables/useTaskDag'
 import { useTheme } from './composables/useTheme'
+
+// 两个图形面板都不属于默认代码视图。异步组件使 ECharts/Vue Flow 在用户首次
+// 打开对应标签时才下载，避免把图形引擎计入工作区首屏关键路径。
+const VueFlow = defineAsyncComponent(() =>
+  import('@vue-flow/core').then((module) => module.VueFlow),
+)
+const TopologyGraph = defineAsyncComponent(() => import('./components/TopologyGraph.vue'))
 
 const { resolvedTheme, setThemePreference, themeOptions, themePreference } = useTheme()
 
@@ -221,7 +226,10 @@ onUnmounted(() => {
 
 // 阶段 6: 视图切换和拓扑组件引用
 const activeTab = ref<'code' | 'dag' | 'topology'>('code')
-const topologyGraphRef = ref<InstanceType<typeof TopologyGraph> | null>(null)
+const topologyGraphRef = ref<{
+  refresh: () => Promise<void>
+  resize: () => void
+} | null>(null)
 
 watch(activeTab, (newTab) => {
   if (newTab === 'topology') {
@@ -869,11 +877,7 @@ const handleSendChatMessage = () => {
         </div>
 
         <!-- 3-B: 拓扑图谱视图 -->
-        <div
-          v-show="activeTab === 'topology'"
-          class="tab-content"
-          style="height: calc(100% - 44px)"
-        >
+        <div v-if="activeTab === 'topology'" class="tab-content" style="height: calc(100% - 44px)">
           <div class="panel" style="height: 100%">
             <TopologyGraph ref="topologyGraphRef" :theme="resolvedTheme" />
           </div>

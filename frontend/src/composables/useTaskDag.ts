@@ -1,8 +1,8 @@
 import { shallowRef } from 'vue'
-import { MarkerType } from '@vue-flow/core'
 import type { Edge, Node } from '@vue-flow/core'
 
 export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'failed'
+const CLOSED_ARROW_MARKER = 'arrowclosed'
 
 const initialNodes: Node[] = [
   {
@@ -63,7 +63,7 @@ const initialEdges: Edge[] = [
   target: target!,
   animated: false,
   style: { stroke: '#444' },
-  markerEnd: MarkerType.ArrowClosed,
+  markerEnd: CLOSED_ARROW_MARKER,
 }))
 
 export function useTaskDag() {
@@ -86,7 +86,7 @@ export function useTaskDag() {
           ...edge,
           animated: true,
           style: { stroke: '#4fc08d', strokeWidth: '3px' },
-          markerEnd: MarkerType.ArrowClosed,
+          markerEnd: CLOSED_ARROW_MARKER,
         }
       }
       if (status === 'failed') {
@@ -94,7 +94,7 @@ export function useTaskDag() {
           ...edge,
           animated: false,
           style: { stroke: '#f44336', strokeWidth: '2px' },
-          markerEnd: MarkerType.ArrowClosed,
+          markerEnd: CLOSED_ARROW_MARKER,
         }
       }
       return edge
@@ -111,7 +111,7 @@ export function useTaskDag() {
       ...edge,
       animated: false,
       style: { stroke: '#444', strokeWidth: '1.5px' },
-      markerEnd: MarkerType.ArrowClosed,
+      markerEnd: CLOSED_ARROW_MARKER,
     }))
     updateDagNodeStatus('architect_task', 'in_progress')
   }
