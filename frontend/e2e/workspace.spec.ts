@@ -78,3 +78,88 @@ test('loads graph workspaces only after their tabs are selected', async ({ page 
   await expect(page.getByText('代码架构拓扑图谱')).toBeVisible()
   await expect(page.getByText('AST 降级模式')).toBeVisible()
 })
+
+test('renders a dynamic DAG and authoritative budget from the SSE event chain', async ({
+  page,
+}) => {
+  const runId = 'run_e2e'
+  const event = (type: string, message: string, extra: Record<string, unknown> = {}) => ({
+    version: 1,
+    type,
+    level: 'info',
+    message,
+    run_id: runId,
+    ...extra,
+  })
+  const usage = {
+    agent_steps: 2,
+    tool_calls: 1,
+    input_tokens: 900,
+    output_tokens: 100,
+    total_tokens: 1000,
+    unmetered_steps: 0,
+  }
+  const limits = {
+    max_agent_steps: 24,
+    max_tool_calls: 32,
+    max_total_tokens: 120_000,
+    model_timeout_seconds: 60,
+  }
+  const events = [
+    event('run.started', '开始'),
+    event('plan.created', '计划完成', {
+      level: 'success',
+      task_id: 'architect_task',
+      payload: {
+        plan: {
+          version: 1,
+          summary: '先模型后入口',
+          tasks: [
+            {
+              id: 'domain_models',
+              title: '整理领域模型',
+              description: '拆分数据对象',
+              file_path: 'CodeSmells/models.py',
+              dependencies: [],
+            },
+            {
+              id: 'entrypoint',
+              title: '调整入口编排',
+              description: '接入领域模型',
+              file_path: 'CodeSmells/main.py',
+              dependencies: ['domain_models'],
+            },
+          ],
+        },
+      },
+    }),
+    event('run.usage.updated', '用量更新', {
+      payload: { usage, limits },
+    }),
+    event('tool.completed', '模型文件写入完成', {
+      level: 'success',
+      task_id: 'domain_models',
+      tool: 'write_code_file',
+      success: true,
+      payload: { file_path: 'CodeSmells/models.py' },
+    }),
+    event('run.completed', '重构完成', { level: 'success', success: true }),
+  ]
+  await page.route('**/api/refactor/stream', async (route) => {
+    await route.fulfill({
+      contentType: 'text/event-stream',
+      body: events.map((item) => `data: ${JSON.stringify(item)}\n\n`).join(''),
+    })
+  })
+
+  await page.goto('/')
+  await page.locator('.initial-btn').click()
+  await page.getByRole('button', { name: '任务 DAG' }).click()
+
+  await expect(page.getByText('🧩 整理领域模型')).toBeVisible()
+  await expect(page.getByText('🧩 调整入口编排')).toBeVisible()
+  await expect(page.getByText(/预算 2\/24 步 · 1\/32 工具 · 1,000\/120,000 Token/)).toBeVisible()
+  await expect(
+    page.locator('.vue-flow__node.dag-node-completed').filter({ hasText: '整理领域模型' }),
+  ).toBeVisible()
+})

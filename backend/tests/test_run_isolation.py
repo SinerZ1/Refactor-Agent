@@ -68,3 +68,69 @@ def test_stream_run_lease_rejects_overlap_and_scopes_every_event(monkeypatch):
 
     second_events = _collect_sse(app_module.refactor_code_stream(request))
     assert second_events[0]["run_id"] != first_run_id
+
+
+def test_hitl_resume_keeps_run_identity_until_terminal_state(monkeypatch):
+    credentials = runtime_sessions.create()
+    request = app_module.RefactorRequest(
+        code="CodeSmells/main.py",
+        thread_id=credentials.thread_id,
+        session_token=credentials.session_token,
+    )
+    lifecycle = {"resumed": False}
+    interrupt_payload = {
+        "type": "write_approval",
+        "file_path": "CodeSmells/main.py",
+        "original_code": "old",
+        "refactored_code": "new",
+    }
+
+    class FakeGraph:
+        def get_state(self, _config):
+            if lifecycle["resumed"]:
+                return SimpleNamespace(
+                    values={"review_status": "success"},
+                    interrupts=(),
+                )
+            return SimpleNamespace(
+                values={"review_status": "running"},
+                interrupts=(SimpleNamespace(value=interrupt_payload),),
+            )
+
+    def fake_stream(_code, _thread_id, config, *_args, **_kwargs):
+        if config["configurable"].get("resume_value"):
+            lifecycle["resumed"] = True
+        yield make_agent_event("run.started", "开始或恢复")
+
+    monkeypatch.setattr(agent, "app_graph", FakeGraph())
+    monkeypatch.setattr(app_module, "stream_refactor", fake_stream)
+
+    suspended_events = _collect_sse(app_module.refactor_code_stream(request))
+    waiting_event = next(
+        event for event in suspended_events if event["type"] == "approval.waiting"
+    )
+    run_id = waiting_event["run_id"]
+    assert (
+        runtime_sessions.require_active_run(
+            credentials.thread_id, credentials.session_token
+        )
+        == run_id
+    )
+
+    app_module.submit_approval(
+        credentials.thread_id,
+        app_module.ApprovalDecisionRequest(
+            session_token=credentials.session_token,
+            approval_id=waiting_event["payload"]["approval_id"],
+            approved=True,
+        ),
+    )
+    resumed_events = _collect_sse(app_module.refactor_code_stream(request))
+
+    assert lifecycle["resumed"] is True
+    assert all(event["run_id"] == run_id for event in resumed_events)
+    assert resumed_events[-1]["type"] == "run.completed"
+    with pytest.raises(RunStateError):
+        runtime_sessions.require_active_run(
+            credentials.thread_id, credentials.session_token
+        )
