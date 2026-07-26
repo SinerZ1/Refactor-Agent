@@ -56,6 +56,7 @@ export interface AgentEvent {
   level: AgentEventLevel
   message: string
   token?: string
+  run_id?: string
   node?: string
   task_id?: string
   tool?: string
@@ -143,6 +144,7 @@ export const parseAgentEvent = (value: unknown): AgentEvent | null => {
   ) {
     return null
   }
+  if (value.run_id !== undefined && typeof value.run_id !== 'string') return null
   if (value.type === 'plan.created') {
     if (!isRecord(value.payload) || !isRefactorPlan(value.payload.plan)) return null
   }

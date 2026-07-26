@@ -313,4 +313,59 @@ describe('App', () => {
     expect(bubbleMarkdown.find('pre code').exists()).toBe(true)
     expect(bubbleMarkdown.find('pre code').text()).toContain('def calculate()')
   })
+
+  it('ignores websocket messages from a stale run after SSE selects the active run', async () => {
+    vi.mocked(fetch).mockImplementation(async (input) => {
+      const url = String(input)
+      if (url.endsWith('/api/sessions')) {
+        return new Response(
+          JSON.stringify({ thread_id: 'session_test', session_token: 'session-token' }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        )
+      }
+      if (url.endsWith('/api/refactor/stream')) {
+        const started = {
+          version: 1,
+          type: 'run.started',
+          level: 'info',
+          message: '开始',
+          run_id: 'run_current',
+        }
+        return new Response(`data: ${JSON.stringify(started)}\n\n`, {
+          status: 200,
+          headers: { 'Content-Type': 'text/event-stream' },
+        })
+      }
+      return new Response(
+        JSON.stringify({ available: false, message: '未找到有效 ADC 凭据文件' }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      )
+    })
+    wrapper = mountApp()
+    await flushPromises()
+    await wrapper.get('.initial-btn').trigger('click')
+    await flushPromises()
+
+    const webSocket = WebSocketStub.instances[0]!
+    webSocket.onmessage?.({
+      data: JSON.stringify({
+        type: 'chatroom_message',
+        run_id: 'run_stale',
+        sender: 'CoderAgent',
+        content: '过期运行消息',
+      }),
+    } as MessageEvent)
+    webSocket.onmessage?.({
+      data: JSON.stringify({
+        type: 'chatroom_message',
+        run_id: 'run_current',
+        sender: 'CoderAgent',
+        content: '当前运行消息',
+      }),
+    } as MessageEvent)
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.text()).not.toContain('过期运行消息')
+    expect(wrapper.text()).toContain('当前运行消息')
+  })
 })

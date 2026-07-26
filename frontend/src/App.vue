@@ -35,6 +35,7 @@ const refactoredCode = ref('')
 const isRefactoring = ref(false)
 let streamAbortController: AbortController | null = null
 let streamGeneration = 0
+const activeRunId = ref('')
 const agentLogs = ref<{ type: 'info' | 'success' | 'error'; message: string; time: string }[]>([])
 
 // 阶段 4：会话与多轮对话记忆状态
@@ -128,6 +129,13 @@ const initWebSocket = () => {
   socket.value.onmessage = (event) => {
     try {
       const data = JSON.parse(event.data)
+      const messageRunId = typeof data.run_id === 'string' ? data.run_id : ''
+      if (messageRunId && activeRunId.value && messageRunId !== activeRunId.value) {
+        return
+      }
+      if (messageRunId && !activeRunId.value) {
+        activeRunId.value = messageRunId
+      }
 
       if (data.type === 'approval_request') {
         // 挂起状态，显示 HITL 审批弹窗
@@ -321,6 +329,7 @@ const handleNewSession = async () => {
   userChatInput.value = ''
   chatMessages.value = []
   agentLogs.value = []
+  activeRunId.value = ''
   resetRunBudget()
   try {
     await createBackendSession()
@@ -417,6 +426,13 @@ const sendStreamRequest = async (payloadText: string, isInitialTurn: boolean) =>
             const jsonStr = line.replace(/^data:\s*/, '')
             const event = parseAgentEvent(JSON.parse(jsonStr))
             if (!event) continue
+            if (event.type === 'run.started' && event.run_id) {
+              activeRunId.value = event.run_id
+            } else if (event.run_id && activeRunId.value && event.run_id !== activeRunId.value) {
+              // HTTP 流可以被 AbortController 取消，但已经排队的 WebSocket/SSE 数据仍
+              // 可能晚到。run_id 是跨通道的 happens-before 边界，旧运行不得再覆写 UI。
+              continue
+            }
 
             applyDagEvent(event)
             applyRunBudgetEvent(event)

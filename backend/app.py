@@ -22,7 +22,7 @@ from agent.budgets import (
     DEFAULT_MODEL_TIMEOUT_SECONDS,
 )
 from agent.credentials import runtime_credentials
-from agent.events import make_agent_event
+from agent.events import AgentEvent, make_agent_event
 from agent_core import simple_refactor, stream_refactor
 from code_indexer import index_directory
 from graph_indexer import get_topology_data, index_to_neo4j
@@ -34,6 +34,7 @@ from model_catalog import (
 )
 from session_registry import (
     ApprovalStateError,
+    RunStateError,
     SessionAuthorizationError,
     runtime_sessions,
 )
@@ -165,6 +166,9 @@ async def websocket_endpoint(websocket: WebSocket, thread_id: str):
                     {
                         "type": "approval_confirmed",
                         "approval_id": data.get("approval_id"),
+                        "run_id": runtime_sessions.require_active_run(
+                            thread_id, session_token
+                        ),
                     }
                 )
 
@@ -175,13 +179,19 @@ async def websocket_endpoint(websocket: WebSocket, thread_id: str):
         manager.disconnect(thread_id, websocket)
 
 
-async def send_chatroom_message(thread_id: str, sender: str, content: str):
+async def send_chatroom_message(
+    thread_id: str,
+    sender: str,
+    content: str,
+    run_id: str | None = None,
+):
     """
     阶段 3: A2A 多角色聊天室，将智能体的中间发言向 WebSocket 广播
     """
-    await manager.send_personal_message(
-        {"type": "chatroom_message", "sender": sender, "content": content}, thread_id
-    )
+    message = {"type": "chatroom_message", "sender": sender, "content": content}
+    if run_id is not None:
+        message["run_id"] = run_id
+    await manager.send_personal_message(message, thread_id)
 
 
 # 配置 CORS，允许前端应用访问
@@ -388,11 +398,17 @@ def refactor_code(request: RefactorRequest):
     """
     接收代码，调用 Agent 进行简单重构
     """
-    authorize_refactor_request(request)
+    session_token = authorize_refactor_request(request)
     config, credential_ref = build_graph_config(request)
+    try:
+        run_id = runtime_sessions.begin_run(request.thread_id, session_token)
+    except RunStateError as exc:
+        runtime_credentials.revoke(credential_ref)
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     try:
         refactored_result = simple_refactor(request.code, config)
     finally:
+        runtime_sessions.finish_run(request.thread_id, session_token, run_id)
         runtime_credentials.revoke(credential_ref)
 
     return RefactorResponse(
@@ -409,29 +425,47 @@ def refactor_code_stream(request: RefactorRequest):
     config, credential_ref = build_graph_config(request)
 
     # 阶段 2：检测是否需要恢复已被挂起的执行
-    approval_decision = runtime_sessions.consume_decision(
-        request.thread_id, session_token
-    )
-    if approval_decision:
-        _, approved = approval_decision
-        config["configurable"]["resume_value"] = {"approved": approved}
-        print(
-            f"[app] Resuming graph for thread `{request.thread_id}` with approved={approved}"
+    try:
+        approval_decision = runtime_sessions.consume_decision(
+            request.thread_id, session_token
         )
+        if approval_decision:
+            _, approved, run_id = approval_decision
+            config["configurable"]["resume_value"] = {"approved": approved}
+            print(
+                f"[app] Resuming run `{run_id}` for thread `{request.thread_id}` "
+                f"with approved={approved}"
+            )
+        else:
+            run_id = runtime_sessions.begin_run(request.thread_id, session_token)
+    except RunStateError as exc:
+        runtime_credentials.revoke(credential_ref)
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     def event_generator():
         stream_failed = False
+        keep_run_open = False
+
+        async def send_run_chatroom_message(
+            thread_id: str, sender: str, content: str
+        ) -> None:
+            await send_chatroom_message(thread_id, sender, content, run_id)
+
+        def serialize_run_event(event: AgentEvent) -> str:
+            event["run_id"] = run_id
+            return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
         try:
             for event in stream_refactor(
                 request.code,
                 request.thread_id,
                 config,
-                send_chatroom_message,
+                send_run_chatroom_message,
                 main_loop,
             ):
                 # SSE 直接承载版本化事件；事件内保留 token 仅用于旧前端显示兼容。
                 stream_failed = stream_failed or event["type"] == "run.failed"
-                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                yield serialize_run_event(event)
 
             # 阶段 2：执行完毕后，检查是否产生了新的挂起（Interrupt）
             from agent import app_graph
@@ -442,8 +476,9 @@ def refactor_code_stream(request: RefactorRequest):
                     # 存在挂起中断（即 write_code_file 工具调用前暂停）
                     interrupt_payload = dict(state.interrupts[0].value)
                     interrupt_payload["approval_id"] = runtime_sessions.begin_approval(
-                        request.thread_id, session_token
+                        request.thread_id, session_token, run_id
                     )
+                    keep_run_open = True
                     print(
                         f"[app] Graph suspended on interrupt for `{request.thread_id}`. Sending WS message and SSE token."
                     )
@@ -456,7 +491,7 @@ def refactor_code_stream(request: RefactorRequest):
                         tool="write_code_file",
                         payload=interrupt_payload,
                     )
-                    yield f"data: {json.dumps(approval_event, ensure_ascii=False)}\n\n"
+                    yield serialize_run_event(approval_event)
 
                     # 方案 B：同时尝试通过 WebSocket 发送（向下兼容）
                     try:
@@ -466,6 +501,7 @@ def refactor_code_stream(request: RefactorRequest):
                                 manager.send_personal_message(
                                     {
                                         "type": "approval_request",
+                                        "run_id": run_id,
                                         "payload": interrupt_payload,
                                     },
                                     request.thread_id,
@@ -489,7 +525,7 @@ def refactor_code_stream(request: RefactorRequest):
                             node="workflow",
                             success=True,
                         )
-                        yield f"data: {json.dumps(terminal_event, ensure_ascii=False)}\n\n"
+                        yield serialize_run_event(terminal_event)
                     elif review_status == "failed" and not stream_failed:
                         terminal_event = make_agent_event(
                             "run.failed",
@@ -498,11 +534,13 @@ def refactor_code_stream(request: RefactorRequest):
                             node="workflow",
                             success=False,
                         )
-                        yield f"data: {json.dumps(terminal_event, ensure_ascii=False)}\n\n"
+                        yield serialize_run_event(terminal_event)
             except Exception as e:
                 print(f"[app] Failed to check state interrupts: {e}")
         finally:
             # 客户端断开时生成器也会进入 finally，避免凭据在内存中滞留到 TTL。
+            if not keep_run_open:
+                runtime_sessions.finish_run(request.thread_id, session_token, run_id)
             runtime_credentials.revoke(credential_ref)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")

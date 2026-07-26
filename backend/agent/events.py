@@ -37,6 +37,7 @@ class AgentEvent(TypedDict):
     level: AgentEventLevel
     message: str
     token: str
+    run_id: NotRequired[str]
     node: NotRequired[str]
     task_id: NotRequired[str]
     tool: NotRequired[str]
