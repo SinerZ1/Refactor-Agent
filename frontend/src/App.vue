@@ -6,6 +6,7 @@ import '@vue-flow/core/dist/theme-default.css'
 import { API_BASE_URL } from './api'
 import { useModelProvider } from './composables/useModelProvider'
 import { useTaskDag } from './composables/useTaskDag'
+import { parseAgentEvent } from './types/agentEvents'
 import { useTheme } from './composables/useTheme'
 
 const markedInstance = new Marked({
@@ -62,12 +63,26 @@ const {
 // 阶段 2：WebSocket 双向全双工 & 人机协作审批 (HITL)
 const socket = ref<WebSocket | null>(null)
 const isApprovalModalOpen = ref(false)
-const approvalPayload = ref<{
+interface ApprovalPayload {
   approval_id: string
   file_path: string
   original_code: string
   refactored_code: string
-} | null>(null)
+}
+const approvalPayload = ref<ApprovalPayload | null>(null)
+
+const parseApprovalPayload = (payload: Record<string, unknown> | undefined) => {
+  if (
+    !payload ||
+    typeof payload.approval_id !== 'string' ||
+    typeof payload.file_path !== 'string' ||
+    typeof payload.original_code !== 'string' ||
+    typeof payload.refactored_code !== 'string'
+  ) {
+    return null
+  }
+  return payload as unknown as ApprovalPayload
+}
 
 const createBackendSession = async () => {
   const response = await fetch(`${API_BASE_URL}/api/sessions`, { method: 'POST' })
@@ -250,7 +265,7 @@ watch(activeTab, (newTab) => {
   }
 })
 
-const { dagEdges, dagNodes, resetDag, updateDagNodeStatus } = useTaskDag()
+const { applyDagEvent, dagEdges, dagNodes, resetDag } = useTaskDag()
 
 // 自动滚动控制
 const logContainerRef = ref<HTMLDivElement | null>(null)
@@ -382,87 +397,35 @@ const sendStreamRequest = async (payloadText: string, isInitialTurn: boolean) =>
         if (line.trim().startsWith('data: ')) {
           try {
             const jsonStr = line.replace(/^data:\s*/, '')
-            const parsed = JSON.parse(jsonStr)
-            if (parsed.token) {
-              const token = parsed.token
+            const event = parseAgentEvent(JSON.parse(jsonStr))
+            if (!event) continue
 
-              if (token.startsWith('[INFO]')) {
-                const cleanMsg = token.replace('[INFO]', '').trim()
-                agentLogs.value.push({
-                  type: 'info',
-                  message: cleanMsg,
-                  time: new Date().toLocaleTimeString(),
-                })
-
-                // 阶段 4：从日志中解析重构任务的当前状态并触发 DAG 状态变化
-                if (cleanMsg.includes('Architect')) {
-                  updateDagNodeStatus('architect_task', 'in_progress')
-                } else if (cleanMsg.includes('Developer')) {
-                  updateDagNodeStatus('architect_task', 'completed')
-                  if (cleanMsg.includes('models.py'))
-                    updateDagNodeStatus('models_py', 'in_progress')
-                  if (cleanMsg.includes('Calculator.py'))
-                    updateDagNodeStatus('calculator_py', 'in_progress')
-                  if (cleanMsg.includes('services.py'))
-                    updateDagNodeStatus('services_py', 'in_progress')
-                  if (cleanMsg.includes('main.py')) updateDagNodeStatus('main_py', 'in_progress')
-                } else if (cleanMsg.includes('Reviewer')) {
-                  updateDagNodeStatus('reviewer_task', 'in_progress')
-                }
-              } else if (token.startsWith('[SUCCESS]')) {
-                const cleanMsg = token.replace('[SUCCESS]', '').trim()
-                agentLogs.value.push({
-                  type: 'success',
-                  message: cleanMsg,
-                  time: new Date().toLocaleTimeString(),
-                })
-
-                // 阶段 4：工具执行成功，代表对应文件重构完成，点亮绿灯
-                if (cleanMsg.includes('write_code_file')) {
-                  if (cleanMsg.includes('models.py')) updateDagNodeStatus('models_py', 'completed')
-                  if (cleanMsg.includes('Calculator.py'))
-                    updateDagNodeStatus('calculator_py', 'completed')
-                  if (cleanMsg.includes('services.py'))
-                    updateDagNodeStatus('services_py', 'completed')
-                  if (cleanMsg.includes('main.py')) updateDagNodeStatus('main_py', 'completed')
-                } else if (cleanMsg.includes('run_unit_tests')) {
-                  updateDagNodeStatus('reviewer_task', 'completed')
-                }
-              } else if (token.startsWith('[ERROR]')) {
+            applyDagEvent(event)
+            if (event.type === 'agent.message.delta') {
+              accumulatedResponse += event.message
+              refactoredCode.value = accumulatedResponse
+              if (chatMessages.value[agentMessageIndex]) {
+                chatMessages.value[agentMessageIndex].text = accumulatedResponse
+              }
+            } else if (event.type === 'approval.waiting') {
+              // SSE 是审批的可靠备用通道，WebSocket 继续承担实时双向交互。
+              const payload = parseApprovalPayload(event.payload)
+              if (payload) {
+                approvalPayload.value = payload
+                isApprovalModalOpen.value = true
+              } else {
                 agentLogs.value.push({
                   type: 'error',
-                  message: token.replace('[ERROR]', '').trim(),
+                  message: '收到的审批事件缺少必要字段',
                   time: new Date().toLocaleTimeString(),
                 })
-              } else if (token.startsWith('[APPROVAL_REQUEST]')) {
-                // 阶段 2：通过 SSE 备用通道接收审批请求，防止 WebSocket 断连导致无响应
-                try {
-                  const payloadStr = token.replace('[APPROVAL_REQUEST]', '')
-                  const payloadObj = JSON.parse(payloadStr)
-                  approvalPayload.value = payloadObj
-                  isApprovalModalOpen.value = true
-                } catch (e) {
-                  console.error('解析 SSE 审批请求失败:', e)
-                }
-              } else {
-                // 累积代码文本并更新视图
-                accumulatedResponse += token
-                refactoredCode.value = accumulatedResponse
-                if (chatMessages.value[agentMessageIndex]) {
-                  chatMessages.value[agentMessageIndex].text = accumulatedResponse
-                }
-
-                // 阶段 4：解析内容中是否触发了最终的成功或失败判定
-                if (accumulatedResponse.includes('【REFACTOR_SUCCESS】')) {
-                  updateDagNodeStatus('models_py', 'completed')
-                  updateDagNodeStatus('calculator_py', 'completed')
-                  updateDagNodeStatus('services_py', 'completed')
-                  updateDagNodeStatus('main_py', 'completed')
-                  updateDagNodeStatus('reviewer_task', 'completed')
-                } else if (accumulatedResponse.includes('【REFACTOR_FAIL】')) {
-                  updateDagNodeStatus('reviewer_task', 'failed')
-                }
               }
+            } else {
+              agentLogs.value.push({
+                type: event.level,
+                message: event.message,
+                time: new Date().toLocaleTimeString(),
+              })
             }
           } catch (e) {
             console.error('解析 SSE 失败:', line, e)

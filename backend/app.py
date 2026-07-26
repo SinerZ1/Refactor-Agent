@@ -16,6 +16,7 @@ from langchain_core.runnables import RunnableConfig
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from agent.credentials import runtime_credentials
+from agent.events import make_agent_event
 from agent_core import simple_refactor, stream_refactor
 from code_indexer import index_directory
 from graph_indexer import get_topology_data, index_to_neo4j
@@ -389,16 +390,18 @@ def refactor_code_stream(request: RefactorRequest):
         )
 
     def event_generator():
+        stream_failed = False
         try:
-            for token in stream_refactor(
+            for event in stream_refactor(
                 request.code,
                 request.thread_id,
                 config,
                 send_chatroom_message,
                 main_loop,
             ):
-                # 将每个 token 序列化为 JSON 以便前端解析
-                yield f"data: {json.dumps({'token': token})}\n\n"
+                # SSE 直接承载版本化事件；事件内保留 token 仅用于旧前端显示兼容。
+                stream_failed = stream_failed or event["type"] == "run.failed"
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
             # 阶段 2：执行完毕后，检查是否产生了新的挂起（Interrupt）
             from agent import app_graph
@@ -416,7 +419,14 @@ def refactor_code_stream(request: RefactorRequest):
                     )
 
                     # 方案 A：通过 SSE 确保前端必定收到
-                    yield f"data: {json.dumps({'token': '[APPROVAL_REQUEST]' + json.dumps(interrupt_payload)})}\n\n"
+                    approval_event = make_agent_event(
+                        "approval.waiting",
+                        "等待用户确认文件写入",
+                        node="developer",
+                        tool="write_code_file",
+                        payload=interrupt_payload,
+                    )
+                    yield f"data: {json.dumps(approval_event, ensure_ascii=False)}\n\n"
 
                     # 方案 B：同时尝试通过 WebSocket 发送（向下兼容）
                     try:
@@ -440,6 +450,25 @@ def refactor_code_stream(request: RefactorRequest):
                     print(
                         f"[app] No interrupts found for thread `{request.thread_id}` after stream_refactor."
                     )
+                    review_status = state.values.get("review_status")
+                    if review_status == "success" and not stream_failed:
+                        terminal_event = make_agent_event(
+                            "run.completed",
+                            "重构工作流已完成",
+                            level="success",
+                            node="workflow",
+                            success=True,
+                        )
+                        yield f"data: {json.dumps(terminal_event, ensure_ascii=False)}\n\n"
+                    elif review_status == "failed" and not stream_failed:
+                        terminal_event = make_agent_event(
+                            "run.failed",
+                            "重构工作流未通过最终审查",
+                            level="error",
+                            node="workflow",
+                            success=False,
+                        )
+                        yield f"data: {json.dumps(terminal_event, ensure_ascii=False)}\n\n"
             except Exception as e:
                 print(f"[app] Failed to check state interrupts: {e}")
         finally:

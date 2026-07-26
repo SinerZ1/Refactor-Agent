@@ -51,19 +51,29 @@ def resolve_path(file_path: str) -> str:
     return str(resolved_path)
 
 
-@tool
-def read_code_file(file_path: str) -> str:
+@tool(response_format="content_and_artifact")
+def read_code_file(file_path: str) -> tuple[str, dict]:
     """
     读取指定路径下的本地代码文件内容。当需要查看某个具体文件的代码时使用。
     """
     try:
         abs_path = resolve_path(file_path)
         if os.path.getsize(abs_path) > MAX_CODE_FILE_BYTES:
-            return "读取文件失败: 文件超过 1 MB 安全上限"
+            return (
+                "读取文件失败: 文件超过 1 MB 安全上限",
+                {
+                    "success": False,
+                    "file_path": file_path,
+                    "failure_kind": "size_limit",
+                },
+            )
         with open(abs_path, "r", encoding="utf-8") as f:
-            return f.read()
+            return f.read(), {"success": True, "file_path": file_path}
     except Exception as e:
-        return f"读取文件失败: {str(e)}"
+        return (
+            f"读取文件失败: {str(e)}",
+            {"success": False, "file_path": file_path, "failure_kind": "read_error"},
+        )
 
 
 @tool
@@ -76,9 +86,29 @@ def write_code_file(
     将重构后的完整代码写入到指定的本地文件路径中。当重构完成并且需要保存修改时使用。
     """
 
-    def tool_result(message: str, change_record: ChangeRecord | None = None) -> Command:
+    def tool_result(
+        message: str,
+        *,
+        success: bool,
+        failure_kind: str | None = None,
+        change_record: ChangeRecord | None = None,
+    ) -> Command:
+        artifact = {
+            "success": success,
+            "file_path": file_path,
+        }
+        if failure_kind is not None:
+            artifact["failure_kind"] = failure_kind
         update: dict = {
-            "messages": [ToolMessage(content=message, tool_call_id=tool_call_id)]
+            "messages": [
+                ToolMessage(
+                    content=message,
+                    tool_call_id=tool_call_id,
+                    name="write_code_file",
+                    status="success" if success else "error",
+                    artifact=artifact,
+                )
+            ]
         }
         if change_record is not None:
             update["change_records"] = [change_record]
@@ -86,7 +116,11 @@ def write_code_file(
 
     try:
         if len(content.encode("utf-8")) > MAX_CODE_FILE_BYTES:
-            return tool_result("写入文件失败: 内容超过 1 MB 安全上限")
+            return tool_result(
+                "写入文件失败: 内容超过 1 MB 安全上限",
+                success=False,
+                failure_kind="size_limit",
+            )
         abs_path = resolve_path(file_path)
         # 获取原文件代码（如果存在），供前端展示 Diff 对比
         original_code = ""
@@ -118,7 +152,9 @@ def write_code_file(
 
         if not approved:
             return tool_result(
-                f"写入文件 `{abs_path}` 失败：用户在人机协作审批中点击拒绝，打回修改。"
+                f"写入文件 `{abs_path}` 失败：用户在人机协作审批中点击拒绝，打回修改。",
+                success=False,
+                failure_kind="approval_rejected",
             )
 
         # 审批通过，执行本地写入
@@ -146,14 +182,19 @@ def write_code_file(
         change_record = build_change_record(abs_path, original_code, content)
         return tool_result(
             f"成功将重构代码写入到文件: {abs_path}{index_message}",
-            change_record,
+            success=True,
+            change_record=change_record,
         )
     except GraphInterrupt:
         # 重要：必须重新抛出 GraphInterrupt，否则会被底下的 Exception 捕获
         # 从而导致 LangGraph 的中断挂起机制失效，直接把打断异常当作普通错误返回给大模型
         raise
     except Exception as e:
-        return tool_result(f"写入文件失败: {str(e)}")
+        return tool_result(
+            f"写入文件失败: {str(e)}",
+            success=False,
+            failure_kind="write_error",
+        )
 
 
 def build_change_record(
@@ -203,10 +244,10 @@ def build_change_record(
     }
 
 
-@tool
+@tool(response_format="content_and_artifact")
 def run_unit_tests(
     test_suite: Literal["backend", "codesmells", "all"] = "all",
-) -> str:
+) -> tuple[str, dict]:
     """
     运行预定义测试套件。只能选择 backend、codesmells 或 all，不能传入 shell 命令。
     """
@@ -240,24 +281,43 @@ def run_unit_tests(
         output = output.strip()
         if not output:
             output = "<无任何标准输出或错误输出 (No output)>"
-        return f"测试执行完成。退出代码 (Exit Code): {result.returncode}\n输出内容:\n{output}"
+        success = result.returncode == 0
+        return (
+            f"测试执行完成。退出代码 (Exit Code): {result.returncode}\n输出内容:\n{output}",
+            {
+                "success": success,
+                "test_suite": test_suite,
+                "exit_code": result.returncode,
+                **({} if success else {"failure_kind": "test_failure"}),
+            },
+        )
     except Exception as e:
-        return f"运行测试失败: {str(e)}"
+        return (
+            f"运行测试失败: {str(e)}",
+            {
+                "success": False,
+                "test_suite": test_suite,
+                "failure_kind": "test_execution_error",
+            },
+        )
 
 
-@tool
-def search_symbol_definition(symbol_name: str) -> str:
+@tool(response_format="content_and_artifact")
+def search_symbol_definition(symbol_name: str) -> tuple[str, dict]:
     """
     当你分析或重构当前文件，遇到外部导入的类名、函数名时，可以使用此工具查询它在本项目其他文件中的原始定义和源代码，支持精准跨文件上下文召回（RAG）。
     """
     # 动态导入避免循环依赖
     from code_indexer import get_symbol_definition_content
 
-    return get_symbol_definition_content(symbol_name)
+    return get_symbol_definition_content(symbol_name), {
+        "success": True,
+        "symbol_name": symbol_name,
+    }
 
 
-@tool
-def query_neo4j_topology() -> str:
+@tool(response_format="content_and_artifact")
+def query_neo4j_topology() -> tuple[str, dict]:
     """
     查询 Neo4j 数据库中的项目代码调用图谱。返回项目中所有类、函数（节点）以及它们之间的调用关系（CALLS 边）。
     这能帮助你快速理清跨文件的代码依赖、调用拓扑和项目结构。
@@ -278,9 +338,15 @@ def query_neo4j_topology() -> str:
         for link in data["links"]:
             result_str += f"- {link['source']} -> {link['target']}\n"
         result_str += "================================="
-        return result_str
+        return result_str, {
+            "success": True,
+            "degraded": bool(data.get("fallback")),
+        }
     except Exception as e:
-        return f"查询 Neo4j 拓扑图谱失败: {str(e)}"
+        return (
+            f"查询 Neo4j 拓扑图谱失败: {str(e)}",
+            {"success": False, "failure_kind": "topology_query_error"},
+        )
 
 
 # 区分不同智能体的工具集合

@@ -1,12 +1,12 @@
 import asyncio
-import json
 from collections.abc import Callable, Coroutine, Iterator
 from typing import Any
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command
 
+from .events import AgentEvent, make_agent_event
 from .state import State, get_message_text
 from .workflow import app_graph
 
@@ -42,15 +42,24 @@ def stream_refactor(
     config: RunnableConfig | None = None,
     ws_callback: Callable[[str, str, str], Coroutine[Any, Any, Any]] | None = None,
     main_loop: asyncio.AbstractEventLoop | None = None,
-) -> Iterator[str]:
+) -> Iterator[AgentEvent]:
     """
-    使用 LangGraph 状态图执行多轮对话流式生成器
+    使用 LangGraph 状态图执行多轮对话，并输出版本化结构事件。
+
+    LangGraph 的 ``updates`` 是内部图状态增量；这里将其翻译为稳定的业务事件，
+    避免浏览器理解 ToolMessage、节点名或提示词文本。它是 Graph State 与 UI
+    之间的反腐层（Anti-Corruption Layer），后续替换图实现也不会污染前端。
     """
     # 构造配置，如果传入了更丰富的运行时配置，在这里进行 merge
     run_config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
     if config and "configurable" in config:
         run_config["configurable"].update(config["configurable"])
 
+    yield make_agent_event(
+        "run.started",
+        "重构工作流已启动",
+        node="workflow",
+    )
     current_state = app_graph.get_state(run_config)
 
     # 阶段 2：检测是否处于挂起（Interrupt）状态，并根据是否有 resume_value 执行恢复运行
@@ -61,7 +70,11 @@ def stream_refactor(
             stream_input = Command(resume=resume_value)
         else:
             # 如果处于挂起状态但未传 approval 状态，则终止流，防止重复触发
-            yield "[INFO] 状态机已挂起，正在等待用户的人机协作审批放行信号...\n"
+            yield make_agent_event(
+                "log",
+                "状态机已挂起，正在等待用户的人机协作审批放行信号",
+                node="workflow",
+            )
             return
     else:
         if not current_state.values or not current_state.values.get("messages"):
@@ -96,16 +109,69 @@ def stream_refactor(
                     "developer_tools",
                     "reviewer_tools",
                 ]:
-                    # 工具执行节点完毕，向前端推送运行日志
+                    owner_node = node_name.removesuffix("_tools")
                     for msg in node_output.get("messages", []):
-                        yield f"[SUCCESS] 工具 `{msg.name}` 运行结果:\n{get_message_text(msg.content)}\n"
+                        if not isinstance(msg, ToolMessage):
+                            continue
+                        artifact = (
+                            msg.artifact if isinstance(msg.artifact, dict) else {}
+                        )
+                        success = (
+                            msg.status != "error"
+                            and artifact.get("success", True) is not False
+                        )
+                        tool_name = str(msg.name or "unknown_tool")
+                        result_text = get_message_text(msg.content)
+                        payload = dict(artifact)
+                        if artifact.get("failure_kind") == "approval_rejected":
+                            yield make_agent_event(
+                                "approval.rejected",
+                                "用户拒绝了文件写入审批",
+                                level="error",
+                                node=owner_node,
+                                tool=tool_name,
+                                success=False,
+                                payload=payload,
+                            )
+                        yield make_agent_event(
+                            "tool.completed" if success else "tool.failed",
+                            f"工具 `{tool_name}` 运行结果:\n{result_text}",
+                            level="success" if success else "error",
+                            node=owner_node,
+                            tool=tool_name,
+                            success=success,
+                            payload=payload,
+                        )
                 elif node_name in ["architect", "developer", "reviewer"]:
-                    # Agent 运行，检测是否触发工具调用
+                    task_id = (
+                        "architect_task"
+                        if node_name == "architect"
+                        else "reviewer_task" if node_name == "reviewer" else None
+                    )
+                    yield make_agent_event(
+                        "task.started",
+                        f"{node_name.capitalize()} 开始处理任务",
+                        node=node_name,
+                        task_id=task_id,
+                    )
                     prefix = f"\n=== 【{node_name.upper()} 正在发言】 ===\n"
                     for msg in node_output.get("messages", []):
                         if msg.tool_calls:
                             for tc in msg.tool_calls:
-                                yield f"[INFO] {node_name.capitalize()} 决定调用工具 `{tc['name']}`，参数为: {json.dumps(tc['args'], ensure_ascii=False)}\n"
+                                # 写入内容属于审批信荷，不应再复制进普通事件流。这里只暴露
+                                # 调度所需参数与体积，兼顾可观测性、传输成本和日志最小披露。
+                                public_args = dict(tc["args"])
+                                content = public_args.pop("content", None)
+                                if isinstance(content, str):
+                                    public_args["content_chars"] = len(content)
+                                yield make_agent_event(
+                                    "tool.started",
+                                    f"{node_name.capitalize()} 决定调用工具 `{tc['name']}`",
+                                    node=node_name,
+                                    task_id=task_id,
+                                    tool=tc["name"],
+                                    payload={"args": public_args},
+                                )
                         else:
                             # 阶段 3: A2A 多角色聊天室，通过 ws_callback 广播最终发言到 WebSocket 中
                             sender_name = (
@@ -137,15 +203,71 @@ def stream_refactor(
                             text_content = prefix + msg_text + "\n"
                             chunk_size = 12
                             for i in range(0, len(text_content), chunk_size):
-                                yield text_content[i : i + chunk_size]
+                                yield make_agent_event(
+                                    "agent.message.delta",
+                                    text_content[i : i + chunk_size],
+                                    node=node_name,
+                                )
+                            if node_name == "reviewer":
+                                if "【REFACTOR_SUCCESS】" in msg_text:
+                                    yield make_agent_event(
+                                        "review.passed",
+                                        "Reviewer 审查通过",
+                                        level="success",
+                                        node=node_name,
+                                        task_id=task_id,
+                                        success=True,
+                                    )
+                                elif "【REFACTOR_FAIL】" in msg_text:
+                                    yield make_agent_event(
+                                        "review.failed",
+                                        "Reviewer 审查未通过",
+                                        level="error",
+                                        node=node_name,
+                                        task_id=task_id,
+                                        success=False,
+                                    )
+                            elif node_name == "architect":
+                                yield make_agent_event(
+                                    "task.completed",
+                                    "Architect 已完成重构分析",
+                                    level="success",
+                                    node=node_name,
+                                    task_id=task_id,
+                                    success=True,
+                                )
                 elif node_name == "developer_retry":
-                    yield "\n[SYSTEM] 检测到审查未通过，已启动开发者重试节点...\n"
+                    yield make_agent_event(
+                        "run.retrying",
+                        "检测到审查未通过，已启动开发者重试节点",
+                        node="developer",
+                        task_id="reviewer_task",
+                    )
                 elif node_name == "reviewer_protocol_retry":
-                    yield "\n[INFO] Reviewer 未返回规定的终态标记，正在请求其修正结论...\n"
+                    yield make_agent_event(
+                        "run.retrying",
+                        "Reviewer 未返回规定的终态标记，正在请求其修正结论",
+                        node="reviewer",
+                        task_id="reviewer_task",
+                    )
                 elif node_name == "finalize_review_failure":
                     for msg in node_output.get("messages", []):
-                        yield f"\n{get_message_text(msg.content)}\n"
+                        yield make_agent_event(
+                            "agent.message.delta",
+                            f"\n{get_message_text(msg.content)}\n",
+                            node="reviewer",
+                        )
                 elif node_name == "__interrupt__":
-                    yield "\n[SYSTEM] 触发人机协作审查 (HITL)，请在弹窗中确认文件写入操作...\n"
+                    yield make_agent_event(
+                        "log",
+                        "触发人机协作审查 (HITL)，请在弹窗中确认文件写入操作",
+                        node="developer",
+                    )
     except Exception as e:
-        yield f"\n# [运行失败]\n# 错误信息: {str(e)}\n"
+        yield make_agent_event(
+            "run.failed",
+            f"重构工作流运行失败: {str(e)}",
+            level="error",
+            node="workflow",
+            success=False,
+        )

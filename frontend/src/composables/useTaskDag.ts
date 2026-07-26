@@ -1,5 +1,6 @@
 import { shallowRef } from 'vue'
 import type { Edge, Node } from '@vue-flow/core'
+import type { AgentEvent } from '../types/agentEvents'
 
 export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'failed'
 const CLOSED_ARROW_MARKER = 'arrowclosed'
@@ -97,8 +98,74 @@ export function useTaskDag() {
           markerEnd: CLOSED_ARROW_MARKER,
         }
       }
-      return edge
+      return {
+        ...edge,
+        animated: false,
+        style: { stroke: '#444', strokeWidth: '1.5px' },
+        markerEnd: CLOSED_ARROW_MARKER,
+      }
     })
+  }
+
+  const findFileTaskId = (event: AgentEvent): string | undefined => {
+    const args =
+      event.payload && typeof event.payload.args === 'object' && event.payload.args !== null
+        ? (event.payload.args as Record<string, unknown>)
+        : undefined
+    const rawPath = event.payload?.file_path ?? args?.file_path
+    if (typeof rawPath !== 'string') return undefined
+    const fileName = rawPath.replace(/\\/g, '/').split('/').pop()?.toLowerCase()
+    return dagNodes.value.find((node) => String(node.data?.file ?? '').toLowerCase() === fileName)
+      ?.id
+  }
+
+  /**
+   * 事件归约器是 DAG 的唯一写入口。它消费后端明确声明的事件语义，
+   * 不再从中文日志、文件名片段或 Reviewer 自然语言中猜测状态。
+   */
+  const applyDagEvent = (event: AgentEvent) => {
+    const explicitTaskId = event.task_id
+    const fileTaskId = findFileTaskId(event)
+
+    switch (event.type) {
+      case 'task.started':
+        if (explicitTaskId) updateDagNodeStatus(explicitTaskId, 'in_progress')
+        break
+      case 'task.completed':
+        if (explicitTaskId) updateDagNodeStatus(explicitTaskId, 'completed')
+        break
+      case 'tool.started':
+        if (event.tool === 'write_code_file' && fileTaskId) {
+          updateDagNodeStatus(fileTaskId, 'in_progress')
+        } else if (event.tool === 'run_unit_tests') {
+          updateDagNodeStatus('reviewer_task', 'in_progress')
+        }
+        break
+      case 'tool.completed':
+        if (event.tool === 'write_code_file' && fileTaskId) {
+          updateDagNodeStatus(fileTaskId, 'completed')
+        }
+        break
+      case 'tool.failed':
+      case 'approval.rejected':
+        if (event.tool === 'write_code_file' && fileTaskId) {
+          updateDagNodeStatus(fileTaskId, 'failed')
+        } else if (event.tool === 'run_unit_tests') {
+          updateDagNodeStatus('reviewer_task', 'failed')
+        }
+        break
+      case 'review.passed':
+      case 'run.completed':
+        updateDagNodeStatus('reviewer_task', 'completed')
+        break
+      case 'review.failed':
+      case 'run.failed':
+        updateDagNodeStatus('reviewer_task', 'failed')
+        break
+      case 'run.retrying':
+        updateDagNodeStatus('reviewer_task', 'in_progress')
+        break
+    }
   }
 
   const resetDag = () => {
@@ -119,6 +186,7 @@ export function useTaskDag() {
   return {
     dagEdges,
     dagNodes,
+    applyDagEvent,
     resetDag,
     updateDagNodeStatus,
   }

@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from 'vitest'
 
 import { useModelProvider } from '../composables/useModelProvider'
 import { useTaskDag } from '../composables/useTaskDag'
+import { parseAgentEvent } from '../types/agentEvents'
 
 describe('workspace composables', () => {
   beforeEach(() => {
@@ -39,5 +40,44 @@ describe('workspace composables', () => {
     )
     expect(dagNodes.value.find((node) => node.id === 'models_py')?.data.status).toBe('pending')
     expect(dagEdges.value.every((edge) => edge.animated === false)).toBe(true)
+  })
+
+  it('reduces structured tool events without parsing log text', () => {
+    const { applyDagEvent, dagNodes } = useTaskDag()
+    const started = parseAgentEvent({
+      version: 1,
+      type: 'tool.started',
+      level: 'info',
+      message: '文案可以任意变化',
+      tool: 'write_code_file',
+      payload: { args: { file_path: 'CodeSmells/models.py' } },
+    })
+    const failed = parseAgentEvent({
+      version: 1,
+      type: 'tool.failed',
+      level: 'error',
+      message: '不依赖失败关键字',
+      tool: 'write_code_file',
+      success: false,
+      payload: { file_path: 'CodeSmells/models.py' },
+    })
+
+    expect(started).not.toBeNull()
+    expect(failed).not.toBeNull()
+    applyDagEvent(started!)
+    expect(dagNodes.value.find((node) => node.id === 'models_py')?.data.status).toBe('in_progress')
+    applyDagEvent(failed!)
+    expect(dagNodes.value.find((node) => node.id === 'models_py')?.data.status).toBe('failed')
+  })
+
+  it('rejects malformed event envelopes', () => {
+    expect(
+      parseAgentEvent({
+        version: 2,
+        type: 'tool.completed',
+        level: 'success',
+        message: 'unsupported version',
+      }),
+    ).toBeNull()
   })
 })

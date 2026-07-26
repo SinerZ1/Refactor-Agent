@@ -59,6 +59,9 @@ def test_change_record_contains_verifiable_bounded_diff(monkeypatch, tmp_path):
     change_record = result["change_records"][0]
     assert isinstance(tool_message, ToolMessage)
     assert tool_message.tool_call_id == "write-call-1"
+    assert tool_message.status == "success"
+    assert tool_message.artifact["success"] is True
+    assert tool_message.artifact["file_path"] == "CodeSmells/example.py"
     assert target.read_text(encoding="utf-8") == "new\nextra\n"
     assert change_record["file_path"] == "CodeSmells/example.py"
     assert change_record["before_sha256"] != change_record["after_sha256"]
