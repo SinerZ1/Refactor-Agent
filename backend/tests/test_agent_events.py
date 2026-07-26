@@ -134,3 +134,51 @@ def test_stream_emits_plan_and_correlates_file_tool_to_dynamic_task(monkeypatch)
     tool_event = next(event for event in events if event["type"] == "tool.completed")
     assert plan_event["payload"]["plan"] == plan
     assert tool_event["task_id"] == "domain_models"
+
+
+def test_stream_exposes_usage_and_budget_exhaustion_as_structured_events(monkeypatch):
+    usage = {
+        "agent_steps": 3,
+        "tool_calls": 2,
+        "input_tokens": 900,
+        "output_tokens": 100,
+        "total_tokens": 1000,
+        "unmetered_steps": 0,
+    }
+    limits = {
+        "max_agent_steps": 3,
+        "max_tool_calls": 4,
+        "max_total_tokens": 10_000,
+        "model_timeout_seconds": 30,
+    }
+
+    class FakeGraph:
+        def get_state(self, _config):
+            return SimpleNamespace(values={}, interrupts=())
+
+        def stream(self, *_args, **_kwargs):
+            yield {
+                "developer": {
+                    "messages": [
+                        AIMessage(content="【RUN_BUDGET_EXCEEDED】Agent 步数达到上限")
+                    ],
+                    "run_usage": usage,
+                    "run_budget_limits": limits,
+                    "budget_exceeded": True,
+                    "budget_reason": "Agent 步数达到上限",
+                }
+            }
+
+    monkeypatch.setattr(agent, "app_graph", FakeGraph())
+
+    events = list(agent.stream_refactor("继续", "budget-event-test"))
+
+    usage_event = next(
+        event for event in events if event["type"] == "run.usage.updated"
+    )
+    exceeded_event = next(
+        event for event in events if event["type"] == "run.budget.exceeded"
+    )
+    assert usage_event["payload"]["usage"]["total_tokens"] == 1000
+    assert exceeded_event["success"] is False
+    assert exceeded_event["payload"]["reason"] == "Agent 步数达到上限"

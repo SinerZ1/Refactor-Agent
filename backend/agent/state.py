@@ -3,6 +3,7 @@ from typing import Annotated, Any, Literal, NotRequired, TypedDict
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 
+from .budgets import RunBudgetLimits, RunUsage
 from .plans import RefactorPlan
 
 # ============================================================
@@ -51,6 +52,10 @@ class State(TypedDict):
     # 二者并存使模型可解释性和状态机确定性不必互相牺牲。
     refactor_plan: NotRequired[RefactorPlan | None]
     plan_error: NotRequired[str | None]
+    run_usage: NotRequired[RunUsage]
+    run_budget_limits: NotRequired[RunBudgetLimits]
+    budget_exceeded: NotRequired[bool]
+    budget_reason: NotRequired[str | None]
 
 
 def get_message_text(content: Any) -> str:

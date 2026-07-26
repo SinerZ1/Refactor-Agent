@@ -1,7 +1,8 @@
 from langchain_core.messages import AIMessage
 
-from agent.edges import route_reviewer
+from agent.edges import route_architect, route_developer, route_reviewer
 from agent.nodes import (
+    finalize_budget_failure_node,
     finalize_review_failure_node,
     finalize_review_success_node,
     reviewer_protocol_retry_node,
@@ -59,3 +60,19 @@ def test_protocol_retry_node_increments_counter_and_explains_contract():
     assert result["review_protocol_errors"] == 2
     assert "【REFACTOR_SUCCESS】" in result["messages"][0].content
     assert "【REFACTOR_FAIL】" in result["messages"][0].content
+
+
+def test_budget_failure_has_priority_in_every_role_route():
+    state = _state("看似正常")
+    state["budget_exceeded"] = True
+
+    assert route_architect(state) == "finalize_budget_failure"
+    assert route_developer(state) == "finalize_budget_failure"
+    assert route_reviewer(state) == "finalize_budget_failure"
+
+    terminal = finalize_budget_failure_node(
+        {**state, "budget_reason": "工具调用预算耗尽"}
+    )
+    assert terminal["review_status"] == "failed"
+    assert "【REFACTOR_FAIL】" in terminal["messages"][0].content
+    assert "工具调用预算耗尽" in terminal["messages"][0].content

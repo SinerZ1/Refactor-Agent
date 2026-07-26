@@ -6,6 +6,7 @@ from langchain_core.messages import HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command
 
+from .budgets import empty_run_usage
 from .events import AgentEvent, make_agent_event
 from .plans import RefactorPlan, find_plan_task_id
 from .state import State, get_message_text
@@ -31,6 +32,9 @@ def simple_refactor(code: str, config: RunnableConfig | None = None) -> str:
         "change_records": [],
         "refactor_plan": None,
         "plan_error": None,
+        "run_usage": empty_run_usage(),
+        "budget_exceeded": False,
+        "budget_reason": None,
     }
     try:
         final_state = app_graph.invoke(initial_state, run_config)
@@ -55,8 +59,11 @@ def stream_refactor(
     """
     # 构造配置，如果传入了更丰富的运行时配置，在这里进行 merge
     run_config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
-    if config and "configurable" in config:
-        run_config["configurable"].update(config["configurable"])
+    if config:
+        if "recursion_limit" in config:
+            run_config["recursion_limit"] = config["recursion_limit"]
+        if "configurable" in config:
+            run_config["configurable"].update(config["configurable"])
 
     yield make_agent_event(
         "run.started",
@@ -92,6 +99,9 @@ def stream_refactor(
                 change_records=[],
                 refactor_plan=None,
                 plan_error=None,
+                run_usage=empty_run_usage(),
+                budget_exceeded=False,
+                budget_reason=None,
             )
         else:
             stream_input = State(
@@ -102,6 +112,9 @@ def stream_refactor(
                 change_records=[],
                 refactor_plan=None,
                 plan_error=None,
+                run_usage=empty_run_usage(),
+                budget_exceeded=False,
+                budget_reason=None,
             )
 
     try:
@@ -167,6 +180,42 @@ def stream_refactor(
                         node=node_name,
                         task_id=task_id,
                     )
+                    usage = node_output.get("run_usage")
+                    limits = node_output.get("run_budget_limits")
+                    if isinstance(usage, dict) and isinstance(limits, dict):
+                        unmetered_note = (
+                            f"，其中 {usage.get('unmetered_steps', 0)} 步未返回 Token 计量"
+                            if usage.get("unmetered_steps")
+                            else ""
+                        )
+                        yield make_agent_event(
+                            "run.usage.updated",
+                            (
+                                f"运行用量：Agent {usage.get('agent_steps', 0)}/"
+                                f"{limits.get('max_agent_steps', 0)}，工具 "
+                                f"{usage.get('tool_calls', 0)}/"
+                                f"{limits.get('max_tool_calls', 0)}，Token "
+                                f"{usage.get('total_tokens', 0)}/"
+                                f"{limits.get('max_total_tokens', 0)}{unmetered_note}"
+                            ),
+                            node=node_name,
+                            task_id=task_id,
+                            payload={"usage": usage, "limits": limits},
+                        )
+                    if node_output.get("budget_exceeded"):
+                        yield make_agent_event(
+                            "run.budget.exceeded",
+                            str(node_output.get("budget_reason") or "运行预算已耗尽"),
+                            level="error",
+                            node=node_name,
+                            task_id=task_id,
+                            success=False,
+                            payload={
+                                "usage": usage or {},
+                                "limits": limits or {},
+                                "reason": node_output.get("budget_reason"),
+                            },
+                        )
                     if node_name == "architect" and (
                         "refactor_plan" in node_output or "plan_error" in node_output
                     ):
@@ -302,6 +351,13 @@ def stream_refactor(
                             "agent.message.delta",
                             f"\n{get_message_text(msg.content)}\n",
                             node="reviewer",
+                        )
+                elif node_name == "finalize_budget_failure":
+                    for msg in node_output.get("messages", []):
+                        yield make_agent_event(
+                            "agent.message.delta",
+                            f"\n{get_message_text(msg.content)}\n",
+                            node="workflow",
                         )
                 elif node_name == "__interrupt__":
                     yield make_agent_event(

@@ -41,9 +41,46 @@ def test_graph_config_replaces_api_key_with_opaque_reference():
         assert "session-test-secret" not in repr(config)
         assert "unit-test-secret" not in repr(metadata)
         assert configurable["credential_ref"] == credential_ref
+        assert configurable["run_budget"]["max_agent_steps"] == 24
+        assert config["recursion_limit"] > 24
         assert runtime_credentials.resolve(credential_ref or "") == "unit-test-secret"
     finally:
         runtime_credentials.revoke(credential_ref)
+
+
+def test_run_budget_rejects_attempts_to_disable_safety_limits():
+    with pytest.raises(ValidationError):
+        RefactorRequest.model_validate(
+            {
+                "code": "CodeSmells/main.py",
+                "run_budget": {
+                    "max_agent_steps": 0,
+                    "max_tool_calls": 0,
+                    "max_total_tokens": 0,
+                    "model_timeout_seconds": 0,
+                },
+            }
+        )
+
+
+def test_custom_run_budget_enters_graph_config_and_recursion_guard():
+    request = RefactorRequest.model_validate(
+        {
+            "code": "CodeSmells/main.py",
+            "run_budget": {
+                "max_agent_steps": 6,
+                "max_tool_calls": 7,
+                "max_total_tokens": 8000,
+                "model_timeout_seconds": 15,
+            },
+        }
+    )
+
+    config, credential_ref = build_graph_config(request)
+
+    assert credential_ref is None
+    assert config["configurable"]["run_budget"]["model_timeout_seconds"] == 15
+    assert config["recursion_limit"] == 42
 
 
 def test_runtime_credential_reference_is_revoked():

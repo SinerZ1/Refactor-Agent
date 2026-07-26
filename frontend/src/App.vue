@@ -5,6 +5,7 @@ import '@vue-flow/core/dist/style.css'
 import '@vue-flow/core/dist/theme-default.css'
 import { API_BASE_URL } from './api'
 import { useModelProvider } from './composables/useModelProvider'
+import { useRunBudget } from './composables/useRunBudget'
 import { useTaskDag } from './composables/useTaskDag'
 import { parseAgentEvent } from './types/agentEvents'
 import { useTheme } from './composables/useTheme'
@@ -273,6 +274,14 @@ watch(activeTab, (newTab) => {
 })
 
 const { applyDagEvent, dagEdges, dagNodes, resetDag } = useTaskDag()
+const {
+  applyRunBudgetEvent,
+  exceededReason,
+  isBudgetExceeded,
+  limits: budgetLimits,
+  resetRunBudget,
+  usage: budgetUsage,
+} = useRunBudget()
 
 // 自动滚动控制
 const logContainerRef = ref<HTMLDivElement | null>(null)
@@ -312,6 +321,7 @@ const handleNewSession = async () => {
   userChatInput.value = ''
   chatMessages.value = []
   agentLogs.value = []
+  resetRunBudget()
   try {
     await createBackendSession()
     initWebSocket()
@@ -348,6 +358,7 @@ const sendStreamRequest = async (payloadText: string, isInitialTurn: boolean) =>
     refactoredCode.value = ''
     chatMessages.value = []
     resetDag()
+    resetRunBudget()
   }
 
   // 为本次对话在 Chat 中占个位
@@ -408,6 +419,7 @@ const sendStreamRequest = async (payloadText: string, isInitialTurn: boolean) =>
             if (!event) continue
 
             applyDagEvent(event)
+            applyRunBudgetEvent(event)
             if (event.type === 'plan.created' && activeTab.value === 'dag') {
               // Vue Flow 的 fit-view-on-init 只在首次挂载时执行。计划到达后节点数量和
               // 拓扑深度都会变化，因此显式重算视口，确保深层动态 DAG 不会落在画布外。
@@ -846,6 +858,26 @@ const handleSendChatMessage = () => {
               <span class="badge-neo4j" style="background-color: #0b533e; margin-left: 10px"
                 >任务编排</span
               >
+              <span
+                v-if="budgetUsage && budgetLimits"
+                class="badge-neo4j"
+                :title="
+                  isBudgetExceeded
+                    ? exceededReason
+                    : `未计量模型回合：${budgetUsage.unmetered_steps}`
+                "
+                :style="{
+                  backgroundColor: isBudgetExceeded ? '#7f1d1d' : '#1e3a5f',
+                  marginLeft: '10px',
+                }"
+              >
+                预算 {{ budgetUsage.agent_steps }}/{{ budgetLimits.max_agent_steps }} 步 ·
+                {{ budgetUsage.tool_calls }}/{{ budgetLimits.max_tool_calls }} 工具 ·
+                {{ budgetUsage.total_tokens.toLocaleString() }}/{{
+                  budgetLimits.max_total_tokens.toLocaleString()
+                }}
+                Token
+              </span>
             </div>
             <div style="flex: 1; width: 100%; height: 100%; min-height: 350px">
               <VueFlow

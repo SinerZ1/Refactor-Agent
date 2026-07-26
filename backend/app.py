@@ -15,6 +15,12 @@ from fastapi.staticfiles import StaticFiles
 from langchain_core.runnables import RunnableConfig
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
+from agent.budgets import (
+    DEFAULT_MAX_AGENT_STEPS,
+    DEFAULT_MAX_TOOL_CALLS,
+    DEFAULT_MAX_TOTAL_TOKENS,
+    DEFAULT_MODEL_TIMEOUT_SECONDS,
+)
 from agent.credentials import runtime_credentials
 from agent.events import make_agent_event
 from agent_core import simple_refactor, stream_refactor
@@ -212,6 +218,21 @@ class RuntimeModelConfig(BaseModel):
     vertex_auth_mode: Literal["adc", "api_key"] = "adc"
 
 
+class RunBudgetConfig(BaseModel):
+    """单次 Graph 运行的硬预算；边界校验防止关闭护栏或制造异常大 Checkpoint。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_agent_steps: int = Field(default=DEFAULT_MAX_AGENT_STEPS, ge=3, le=100)
+    max_tool_calls: int = Field(default=DEFAULT_MAX_TOOL_CALLS, ge=1, le=200)
+    max_total_tokens: int = Field(
+        default=DEFAULT_MAX_TOTAL_TOKENS, ge=1_000, le=2_000_000
+    )
+    model_timeout_seconds: int = Field(
+        default=DEFAULT_MODEL_TIMEOUT_SECONDS, ge=5, le=300
+    )
+
+
 class RefactorRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -225,6 +246,7 @@ class RefactorRequest(BaseModel):
     custom_model_config: RuntimeModelConfig | None = Field(
         default=None, alias="model_config"
     )
+    run_budget: RunBudgetConfig = Field(default_factory=RunBudgetConfig)
     session_token: SecretStr = SecretStr("")
 
 
@@ -272,6 +294,8 @@ def build_graph_config(
     """构造可持久化的图配置，并把真正密钥替换成随机引用。"""
 
     configurable: dict[str, object] = {"thread_id": request.thread_id}
+    budget = request.run_budget.model_dump()
+    configurable["run_budget"] = budget
     credential_ref: str | None = None
     if request.custom_model_config:
         model_settings = request.custom_model_config
@@ -281,7 +305,13 @@ def build_graph_config(
         )
         if credential_ref:
             configurable["credential_ref"] = credential_ref
-    return {"configurable": configurable}, credential_ref
+    # LangGraph 的 recursion_limit 是最后一道框架级保险丝；业务预算会更早给出可解释
+    # 的失败事件，而该上限防御未来新增节点忘记接入预算控制的情况。
+    recursion_limit = budget["max_agent_steps"] * 3 + budget["max_tool_calls"] * 2 + 10
+    return {
+        "configurable": configurable,
+        "recursion_limit": recursion_limit,
+    }, credential_ref
 
 
 def authorize_refactor_request(request: RefactorRequest) -> str:

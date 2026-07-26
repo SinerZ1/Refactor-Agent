@@ -320,6 +320,9 @@ export function useTaskDag() {
       case 'run.retrying':
         updateDagNodeStatus('reviewer_task', 'in_progress')
         break
+      case 'run.budget.exceeded':
+        updateDagNodeStatus(explicitTaskId ?? 'reviewer_task', 'failed')
+        break
     }
   }
 

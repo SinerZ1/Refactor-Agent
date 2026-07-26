@@ -15,6 +15,7 @@ from .nodes import (  # noqa: E402
     call_developer,
     call_reviewer,
     developer_retry_node,
+    finalize_budget_failure_node,
     finalize_review_failure_node,
     finalize_review_success_node,
     reviewer_protocol_retry_node,
@@ -42,6 +43,7 @@ workflow.add_node("developer", call_developer)
 workflow.add_node("reviewer", call_reviewer)
 workflow.add_node("developer_retry", developer_retry_node)
 workflow.add_node("reviewer_protocol_retry", reviewer_protocol_retry_node)
+workflow.add_node("finalize_budget_failure", finalize_budget_failure_node)
 workflow.add_node("finalize_review_success", finalize_review_success_node)
 workflow.add_node("finalize_review_failure", finalize_review_failure_node)
 
@@ -59,7 +61,11 @@ workflow.add_edge(START, "architect")
 workflow.add_conditional_edges(
     "architect",
     route_architect,
-    {"architect_tools": "architect_tools", "developer": "developer"},
+    {
+        "architect_tools": "architect_tools",
+        "developer": "developer",
+        "finalize_budget_failure": "finalize_budget_failure",
+    },
 )
 workflow.add_edge("architect_tools", "architect")
 
@@ -67,7 +73,11 @@ workflow.add_edge("architect_tools", "architect")
 workflow.add_conditional_edges(
     "developer",
     route_developer,
-    {"developer_tools": "developer_tools", "reviewer": "reviewer"},
+    {
+        "developer_tools": "developer_tools",
+        "reviewer": "reviewer",
+        "finalize_budget_failure": "finalize_budget_failure",
+    },
 )
 workflow.add_edge("developer_tools", "developer")
 
@@ -82,12 +92,14 @@ workflow.add_conditional_edges(
         "reviewer_tools": "reviewer_tools",
         "developer_retry": "developer_retry",
         "reviewer_protocol_retry": "reviewer_protocol_retry",
+        "finalize_budget_failure": "finalize_budget_failure",
         "finalize_review_success": "finalize_review_success",
         "finalize_review_failure": "finalize_review_failure",
     },
 )
 workflow.add_edge("reviewer_tools", "reviewer")
 workflow.add_edge("reviewer_protocol_retry", "reviewer")
+workflow.add_edge("finalize_budget_failure", END)
 workflow.add_edge("finalize_review_success", END)
 workflow.add_edge("finalize_review_failure", END)
 

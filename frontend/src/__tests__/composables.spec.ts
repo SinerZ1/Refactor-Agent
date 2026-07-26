@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 
 import { useModelProvider } from '../composables/useModelProvider'
+import { useRunBudget } from '../composables/useRunBudget'
 import { useTaskDag } from '../composables/useTaskDag'
 import { parseAgentEvent, type RefactorPlan } from '../types/agentEvents'
 
@@ -157,6 +158,72 @@ describe('workspace composables', () => {
 
     expect(initializeDagFromPlan(cyclicPlan)).toBe(false)
     expect(dagNodes.value.some((node) => node.id === 'models_py')).toBe(true)
+  })
+
+  it('marks the responsible task failed when a run budget is exhausted', () => {
+    const { applyDagEvent, dagNodes } = useTaskDag()
+    const event = parseAgentEvent({
+      version: 1,
+      type: 'run.budget.exceeded',
+      level: 'error',
+      message: '工具调用预算耗尽',
+      task_id: 'architect_task',
+      success: false,
+      payload: {
+        usage: {
+          agent_steps: 3,
+          tool_calls: 4,
+          input_tokens: 800,
+          output_tokens: 200,
+          total_tokens: 1000,
+          unmetered_steps: 0,
+        },
+        limits: {
+          max_agent_steps: 8,
+          max_tool_calls: 4,
+          max_total_tokens: 10_000,
+          model_timeout_seconds: 30,
+        },
+      },
+    })
+
+    expect(event).not.toBeNull()
+    applyDagEvent(event!)
+    expect(dagNodes.value.find((node) => node.id === 'architect_task')?.data.status).toBe('failed')
+  })
+
+  it('projects backend budget usage without estimating tokens in the browser', () => {
+    const { applyRunBudgetEvent, exceededReason, isBudgetExceeded, limits, usage } = useRunBudget()
+    const event = parseAgentEvent({
+      version: 1,
+      type: 'run.budget.exceeded',
+      level: 'error',
+      message: 'Token 预算耗尽',
+      payload: {
+        reason: 'Token 预算耗尽',
+        usage: {
+          agent_steps: 5,
+          tool_calls: 2,
+          input_tokens: 9000,
+          output_tokens: 1500,
+          total_tokens: 10_500,
+          unmetered_steps: 0,
+        },
+        limits: {
+          max_agent_steps: 8,
+          max_tool_calls: 4,
+          max_total_tokens: 10_000,
+          model_timeout_seconds: 30,
+        },
+      },
+    })
+
+    expect(event).not.toBeNull()
+    applyRunBudgetEvent(event!)
+    expect(usage.value?.total_tokens).toBe(10_500)
+    expect(limits.value?.max_total_tokens).toBe(10_000)
+    expect(isBudgetExceeded.value).toBe(true)
+    expect(exceededReason.value).toBe('Token 预算耗尽')
   })
 
   it('rejects malformed event envelopes', () => {

@@ -3,6 +3,8 @@ export type AgentEventType =
   | 'run.completed'
   | 'run.failed'
   | 'run.retrying'
+  | 'run.usage.updated'
+  | 'run.budget.exceeded'
   | 'plan.created'
   | 'task.started'
   | 'task.completed'
@@ -32,6 +34,22 @@ export interface RefactorPlan {
   tasks: RefactorTask[]
 }
 
+export interface RunUsage {
+  agent_steps: number
+  tool_calls: number
+  input_tokens: number
+  output_tokens: number
+  total_tokens: number
+  unmetered_steps: number
+}
+
+export interface RunBudgetLimits {
+  max_agent_steps: number
+  max_tool_calls: number
+  max_total_tokens: number
+  model_timeout_seconds: number
+}
+
 export interface AgentEvent {
   version: 1
   type: AgentEventType
@@ -50,6 +68,8 @@ const EVENT_TYPES = new Set<AgentEventType>([
   'run.completed',
   'run.failed',
   'run.retrying',
+  'run.usage.updated',
+  'run.budget.exceeded',
   'plan.created',
   'task.started',
   'task.completed',
@@ -83,6 +103,31 @@ export const isRefactorPlan = (value: unknown): value is RefactorPlan => {
   )
 }
 
+const hasNonnegativeNumbers = (value: Record<string, unknown>, keys: string[]) =>
+  keys.every(
+    (key) => typeof value[key] === 'number' && Number.isFinite(value[key]) && value[key] >= 0,
+  )
+
+export const isRunUsage = (value: unknown): value is RunUsage =>
+  isRecord(value) &&
+  hasNonnegativeNumbers(value, [
+    'agent_steps',
+    'tool_calls',
+    'input_tokens',
+    'output_tokens',
+    'total_tokens',
+    'unmetered_steps',
+  ])
+
+export const isRunBudgetLimits = (value: unknown): value is RunBudgetLimits =>
+  isRecord(value) &&
+  hasNonnegativeNumbers(value, [
+    'max_agent_steps',
+    'max_tool_calls',
+    'max_total_tokens',
+    'model_timeout_seconds',
+  ])
+
 /**
  * SSE 是不可信的进程边界。这里做轻量运行时校验，避免畸形事件把 Vue 状态树
  * 污染成不可恢复状态；完整 schema 由后端版本号管理。
@@ -100,6 +145,15 @@ export const parseAgentEvent = (value: unknown): AgentEvent | null => {
   }
   if (value.type === 'plan.created') {
     if (!isRecord(value.payload) || !isRefactorPlan(value.payload.plan)) return null
+  }
+  if (value.type === 'run.usage.updated' || value.type === 'run.budget.exceeded') {
+    if (
+      !isRecord(value.payload) ||
+      !isRunUsage(value.payload.usage) ||
+      !isRunBudgetLimits(value.payload.limits)
+    ) {
+      return null
+    }
   }
   return value as unknown as AgentEvent
 }

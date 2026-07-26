@@ -25,6 +25,8 @@ def route_architect(state: State):
     """
     根据 Architect 的最后一条消息决定是调用其绑定的工具，还是流转到 Developer
     """
+    if state.get("budget_exceeded"):
+        return "finalize_budget_failure"
     last_message = state["messages"][-1]
     if _has_tool_calls(last_message):
         return "architect_tools"
@@ -35,6 +37,8 @@ def route_developer(state: State):
     """
     根据 Developer 的最后一条消息决定是调用写文件等工具，还是流转到 Reviewer 审查
     """
+    if state.get("budget_exceeded"):
+        return "finalize_budget_failure"
     last_message = state["messages"][-1]
     if _has_tool_calls(last_message):
         return "developer_tools"
@@ -49,6 +53,8 @@ def route_reviewer(state: State):
     - 如果包含 【REFACTOR_SUCCESS】，进入成功终态；
     - 如果缺少协议标记，有限次要求 Reviewer 修正，避免无限循环或静默成功。
     """
+    if state.get("budget_exceeded"):
+        return "finalize_budget_failure"
     last_message = state["messages"][-1]
     if _has_tool_calls(last_message):
         return "reviewer_tools"

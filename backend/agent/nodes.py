@@ -8,6 +8,12 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
 
+from .budgets import (
+    account_agent_response,
+    budget_preflight_reason,
+    get_run_budget_limits,
+    get_run_usage,
+)
 from .credentials import runtime_credentials
 from .plans import parse_refactor_plan
 from .prompts import ARCHITECT_PROMPT, DEVELOPER_PROMPT, REVIEWER_PROMPT
@@ -51,6 +57,7 @@ def get_llm_from_config(config: RunnableConfig):
     provider = cfg.get("provider", "openai")
     model_name = str(cfg.get("model_name") or os.getenv("MODEL_NAME", "gpt-4o-mini"))
     temperature = cfg.get("temperature", 0.2)
+    model_timeout = get_run_budget_limits(config)["model_timeout_seconds"]
 
     if provider == "openai":
         api_key = _get_runtime_api_key(cfg, "OPENAI_API_KEY")
@@ -63,6 +70,7 @@ def get_llm_from_config(config: RunnableConfig):
             base_url=base_url,
             model=model_name,
             temperature=temperature,
+            timeout=model_timeout,
         )
 
     elif provider == "gemini_studio":
@@ -72,6 +80,7 @@ def get_llm_from_config(config: RunnableConfig):
             google_api_key=api_key,
             vertexai=False,
             temperature=temperature,
+            timeout=model_timeout,
         )
 
     elif provider == "google_vertex":
@@ -95,6 +104,7 @@ def get_llm_from_config(config: RunnableConfig):
                 location=location,
                 vertexai=True,
                 temperature=temperature,
+                timeout=model_timeout,
             )
         else:  # "api_key"
             api_key = _get_runtime_api_key(cfg, "VERTEX_API_KEY")
@@ -106,6 +116,7 @@ def get_llm_from_config(config: RunnableConfig):
                 google_api_key=api_key,
                 vertexai=True,
                 temperature=temperature,
+                timeout=model_timeout,
             )
 
     else:
@@ -119,6 +130,7 @@ def get_llm_from_config(config: RunnableConfig):
                 project=vertex_project,
                 vertexai=True,
                 temperature=temperature,
+                timeout=model_timeout,
             )
         else:
             api_key = os.getenv("OPENAI_API_KEY", "")
@@ -128,6 +140,7 @@ def get_llm_from_config(config: RunnableConfig):
                 base_url=base_url,
                 model=model_name,
                 temperature=temperature,
+                timeout=model_timeout,
             )
 
 
@@ -156,6 +169,49 @@ def ensure_valid_turn_sequence(
     return msg_list
 
 
+def invoke_budgeted_agent(
+    state: State,
+    config: RunnableConfig,
+    *,
+    role: str,
+    llm: Any,
+    messages: Sequence[BaseMessage],
+) -> tuple[AIMessage, dict[str, Any]]:
+    """在每个角色调用点统一执行预算预检与用量记账。
+
+    三个角色共享同一控制面，避免某个节点遗漏计数形成“最弱环节”。预算写入 Graph
+    State 后会随 Checkpointer 穿过 ToolNode 和 HITL 中断，恢复执行时不会重新获得额度。
+    """
+
+    limits = get_run_budget_limits(config)
+    preflight_reason = budget_preflight_reason(state, config)
+    if preflight_reason is not None:
+        response = AIMessage(
+            content=f"【RUN_BUDGET_EXCEEDED】{role} 未执行：{preflight_reason}。"
+        )
+        return response, {
+            "messages": [response],
+            "run_usage": get_run_usage(state),
+            "run_budget_limits": limits,
+            "budget_exceeded": True,
+            "budget_reason": preflight_reason,
+        }
+
+    raw_response = llm.invoke(messages)
+    if not isinstance(raw_response, AIMessage):
+        raise TypeError(f"{role} 模型返回了非 AIMessage 响应")
+    response, usage, limits, budget_reason = account_agent_response(
+        state, config, raw_response
+    )
+    return response, {
+        "messages": [response],
+        "run_usage": usage,
+        "run_budget_limits": limits,
+        "budget_exceeded": budget_reason is not None,
+        "budget_reason": budget_reason,
+    }
+
+
 # 1. Architect 节点
 def call_architect(state: State, config: RunnableConfig):
     messages = state["messages"]
@@ -169,9 +225,14 @@ def call_architect(state: State, config: RunnableConfig):
         fallback_prompt="请根据上述上下文，继续分析架构设计与重构方案。",
     )
     llm = get_llm_from_config(config).bind_tools(architect_tools)
-    response = llm.invoke(messages)
-    result: dict[str, Any] = {"messages": [response]}
-    if not response.tool_calls:
+    response, result = invoke_budgeted_agent(
+        state,
+        config,
+        role="Architect",
+        llm=llm,
+        messages=messages,
+    )
+    if not result["budget_exceeded"] and not response.tool_calls:
         # Tool-call 回合只表示 Architect 仍在采集证据；只有最终发言才有资格生成计划。
         # 校验失败不会终止 Architect -> Developer -> Reviewer 主链，而是显式清空旧计划，
         # 由事件层通知前端退回静态 DAG。这是面向多供应商 LLM 不稳定输出的韧性设计。
@@ -193,8 +254,14 @@ def call_developer(state: State, config: RunnableConfig):
         fallback_prompt="请依据上述架构师的方案和指导意见，开始编写重构代码。",
     )
     llm = get_llm_from_config(config).bind_tools(developer_tools)
-    response = llm.invoke(clean_messages)
-    return {"messages": [response]}
+    _, result = invoke_budgeted_agent(
+        state,
+        config,
+        role="Developer",
+        llm=llm,
+        messages=clean_messages,
+    )
+    return result
 
 
 # 3. Reviewer 节点
@@ -248,8 +315,14 @@ def call_reviewer(state: State, config: RunnableConfig):
         fallback_prompt="请根据上述变更清单和审查标准给出审查结论。",
     )
     llm = get_llm_from_config(config).bind_tools(reviewer_tools)
-    response = llm.invoke(clean_messages)
-    return {"messages": [response]}
+    _, result = invoke_budgeted_agent(
+        state,
+        config,
+        role="Reviewer",
+        llm=llm,
+        messages=clean_messages,
+    )
+    return result
 
 
 # 处理重试的辅助节点
@@ -294,5 +367,15 @@ def finalize_review_failure_node(state: State):
         reason = "Reviewer 连续未返回规定的成功或失败标记，工作流按失败终止。"
     return {
         "messages": [AIMessage(content=f"【REFACTOR_FAIL】{reason}")],
+        "review_status": "failed",
+    }
+
+
+def finalize_budget_failure_node(state: State):
+    """把任意角色触发的资源熔断统一固化为失败终态。"""
+
+    reason = state.get("budget_reason") or "运行预算已耗尽"
+    return {
+        "messages": [AIMessage(content=f"【REFACTOR_FAIL】运行预算终止：{reason}")],
         "review_status": "failed",
     }
