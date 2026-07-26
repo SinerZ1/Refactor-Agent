@@ -1,5 +1,6 @@
 import os
 from collections.abc import Sequence
+from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
@@ -8,6 +9,7 @@ from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
 
 from .credentials import runtime_credentials
+from .plans import parse_refactor_plan
 from .prompts import ARCHITECT_PROMPT, DEVELOPER_PROMPT, REVIEWER_PROMPT
 
 # 使用相对导入保证子包高内聚、易移植
@@ -168,7 +170,15 @@ def call_architect(state: State, config: RunnableConfig):
     )
     llm = get_llm_from_config(config).bind_tools(architect_tools)
     response = llm.invoke(messages)
-    return {"messages": [response]}
+    result: dict[str, Any] = {"messages": [response]}
+    if not response.tool_calls:
+        # Tool-call 回合只表示 Architect 仍在采集证据；只有最终发言才有资格生成计划。
+        # 校验失败不会终止 Architect -> Developer -> Reviewer 主链，而是显式清空旧计划，
+        # 由事件层通知前端退回静态 DAG。这是面向多供应商 LLM 不稳定输出的韧性设计。
+        plan, plan_error = parse_refactor_plan(get_message_text(response.content))
+        result["refactor_plan"] = plan
+        result["plan_error"] = plan_error
+    return result
 
 
 # 2. Developer 节点

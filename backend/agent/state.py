@@ -3,6 +3,8 @@ from typing import Annotated, Any, Literal, NotRequired, TypedDict
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 
+from .plans import RefactorPlan
+
 # ============================================================
 # 教学说明: LangGraph Graph State 状态数据字典定义
 # ------------------------------------------------------------
@@ -45,6 +47,10 @@ class State(TypedDict):
     review_protocol_errors: NotRequired[int]
     review_status: NotRequired[Literal["running", "success", "failed"]]
     change_records: NotRequired[Annotated[list[ChangeRecord], merge_change_records]]
+    # 计划是 Architect 输出的机器可读“控制面”；自然语言消息仍是 Developer 的“数据面”。
+    # 二者并存使模型可解释性和状态机确定性不必互相牺牲。
+    refactor_plan: NotRequired[RefactorPlan | None]
+    plan_error: NotRequired[str | None]
 
 
 def get_message_text(content: Any) -> str:

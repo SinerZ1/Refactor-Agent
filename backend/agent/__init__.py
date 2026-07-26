@@ -1,12 +1,13 @@
 import asyncio
 from collections.abc import Callable, Coroutine, Iterator
-from typing import Any
+from typing import Any, cast
 
 from langchain_core.messages import HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command
 
 from .events import AgentEvent, make_agent_event
+from .plans import RefactorPlan, find_plan_task_id
 from .state import State, get_message_text
 from .workflow import app_graph
 
@@ -28,6 +29,8 @@ def simple_refactor(code: str, config: RunnableConfig | None = None) -> str:
         "review_protocol_errors": 0,
         "review_status": "running",
         "change_records": [],
+        "refactor_plan": None,
+        "plan_error": None,
     }
     try:
         final_state = app_graph.invoke(initial_state, run_config)
@@ -61,6 +64,7 @@ def stream_refactor(
         node="workflow",
     )
     current_state = app_graph.get_state(run_config)
+    active_plan: RefactorPlan | None = current_state.values.get("refactor_plan")
 
     # 阶段 2：检测是否处于挂起（Interrupt）状态，并根据是否有 resume_value 执行恢复运行
     stream_input: State | Command[Any]
@@ -86,6 +90,8 @@ def stream_refactor(
                 review_protocol_errors=0,
                 review_status="running",
                 change_records=[],
+                refactor_plan=None,
+                plan_error=None,
             )
         else:
             stream_input = State(
@@ -94,6 +100,8 @@ def stream_refactor(
                 review_protocol_errors=0,
                 review_status="running",
                 change_records=[],
+                refactor_plan=None,
+                plan_error=None,
             )
 
     try:
@@ -123,12 +131,16 @@ def stream_refactor(
                         tool_name = str(msg.name or "unknown_tool")
                         result_text = get_message_text(msg.content)
                         payload = dict(artifact)
+                        event_task_id = find_plan_task_id(
+                            active_plan, artifact.get("file_path")
+                        )
                         if artifact.get("failure_kind") == "approval_rejected":
                             yield make_agent_event(
                                 "approval.rejected",
                                 "用户拒绝了文件写入审批",
                                 level="error",
                                 node=owner_node,
+                                task_id=event_task_id,
                                 tool=tool_name,
                                 success=False,
                                 payload=payload,
@@ -138,6 +150,7 @@ def stream_refactor(
                             f"工具 `{tool_name}` 运行结果:\n{result_text}",
                             level="success" if success else "error",
                             node=owner_node,
+                            task_id=event_task_id,
                             tool=tool_name,
                             success=success,
                             payload=payload,
@@ -154,6 +167,34 @@ def stream_refactor(
                         node=node_name,
                         task_id=task_id,
                     )
+                    if node_name == "architect" and (
+                        "refactor_plan" in node_output or "plan_error" in node_output
+                    ):
+                        candidate_plan = node_output.get("refactor_plan")
+                        active_plan = (
+                            cast(RefactorPlan, candidate_plan)
+                            if isinstance(candidate_plan, dict)
+                            else None
+                        )
+                        if active_plan is not None:
+                            yield make_agent_event(
+                                "plan.created",
+                                f"Architect 已生成 {len(active_plan['tasks'])} 个重构任务",
+                                level="success",
+                                node=node_name,
+                                task_id="architect_task",
+                                success=True,
+                                payload={"plan": active_plan},
+                            )
+                        elif node_output.get("plan_error"):
+                            yield make_agent_event(
+                                "log",
+                                str(node_output["plan_error"]),
+                                level="error",
+                                node=node_name,
+                                task_id="architect_task",
+                                success=False,
+                            )
                     prefix = f"\n=== 【{node_name.upper()} 正在发言】 ===\n"
                     for msg in node_output.get("messages", []):
                         if msg.tool_calls:
@@ -168,7 +209,12 @@ def stream_refactor(
                                     "tool.started",
                                     f"{node_name.capitalize()} 决定调用工具 `{tc['name']}`",
                                     node=node_name,
-                                    task_id=task_id,
+                                    task_id=(
+                                        find_plan_task_id(
+                                            active_plan, tc["args"].get("file_path")
+                                        )
+                                        or task_id
+                                    ),
                                     tool=tc["name"],
                                     payload={"args": public_args},
                                 )

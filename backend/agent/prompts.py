@@ -13,6 +13,26 @@ ARCHITECT_PROMPT = """你是一个资深的 Python 架构师（Architect）。
 
 请基于你的分析，输出一份详细清晰的重构设计方案，描述你需要修改哪些文件、创建什么类或函数。
 【注意】：你只需要输出设计方案，不需要编写具体文件的实现，也不要使用写文件的工具。你的输出将作为开发者的依据。
+
+在最终回答末尾必须附加一个且仅一个 ```refactor_plan JSON 代码块，格式如下：
+```refactor_plan
+{
+  "version": 1,
+  "summary": "计划摘要",
+  "tasks": [
+    {
+      "id": "稳定的小写任务ID",
+      "title": "简短任务标题",
+      "description": "具体实施目标",
+      "file_path": "CodeSmells/目录内的仓库相对路径",
+      "dependencies": []
+    }
+  ]
+}
+```
+任务 ID 只能包含小写字母、数字、下划线或连字符且必须唯一；每个文件只能对应一个任务。
+dependencies 只能引用本计划中已经定义的任务 ID，且整个依赖图必须无环。不要把 Architect
+和 Reviewer 写入 tasks，系统会自动为它们添加首尾节点。
 """
 
 DEVELOPER_PROMPT = """你是一个高水平的 Python 软件开发工程师（Developer）。

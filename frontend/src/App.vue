@@ -256,11 +256,18 @@ const topologyGraphRef = ref<{
   refresh: () => Promise<void>
   resize: () => void
 } | null>(null)
+const taskDagGraphRef = ref<{
+  fitView: (options?: { padding?: number }) => void
+} | null>(null)
 
 watch(activeTab, (newTab) => {
   if (newTab === 'topology') {
     nextTick(() => {
       topologyGraphRef.value?.resize()
+    })
+  } else if (newTab === 'dag') {
+    nextTick(() => {
+      taskDagGraphRef.value?.fitView({ padding: 0.15 })
     })
   }
 })
@@ -401,6 +408,11 @@ const sendStreamRequest = async (payloadText: string, isInitialTurn: boolean) =>
             if (!event) continue
 
             applyDagEvent(event)
+            if (event.type === 'plan.created' && activeTab.value === 'dag') {
+              // Vue Flow 的 fit-view-on-init 只在首次挂载时执行。计划到达后节点数量和
+              // 拓扑深度都会变化，因此显式重算视口，确保深层动态 DAG 不会落在画布外。
+              nextTick(() => taskDagGraphRef.value?.fitView({ padding: 0.15 }))
+            }
             if (event.type === 'agent.message.delta') {
               accumulatedResponse += event.message
               refactoredCode.value = accumulatedResponse
@@ -837,6 +849,7 @@ const handleSendChatMessage = () => {
             </div>
             <div style="flex: 1; width: 100%; height: 100%; min-height: 350px">
               <VueFlow
+                ref="taskDagGraphRef"
                 v-model:nodes="dagNodes"
                 v-model:edges="dagEdges"
                 :fit-view-on-init="true"

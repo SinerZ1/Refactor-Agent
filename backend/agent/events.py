@@ -6,6 +6,7 @@ AgentEventType = Literal[
     "run.completed",
     "run.failed",
     "run.retrying",
+    "plan.created",
     "task.started",
     "task.completed",
     "tool.started",

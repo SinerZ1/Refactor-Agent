@@ -79,11 +79,13 @@ def test_architect_node_sanitizes_messages_before_invoking_llm(monkeypatch):
         ]
     }
 
-    call_architect(state, config={})
+    result = call_architect(state, config={})
 
     assert len(captured_messages) > 0
     assert not isinstance(captured_messages[-1], AIMessage)
     assert isinstance(captured_messages[-1], HumanMessage)
+    assert result["refactor_plan"] is None
+    assert "默认任务图" in result["plan_error"]
 
 
 def test_reviewer_node_sanitizes_messages_before_invoking_llm(monkeypatch):
