@@ -474,7 +474,13 @@ def refactor_code_stream(request: RefactorRequest):
                 state = app_graph.get_state(config)
                 if state.interrupts:
                     # 存在挂起中断（即 write_code_file 工具调用前暂停）
-                    interrupt_payload = dict(state.interrupts[0].value)
+                    raw_val = state.interrupts[0].value
+                    interrupt_payload = (
+                        dict(raw_val) if isinstance(raw_val, dict) else {}
+                    )
+                    interrupt_payload.setdefault("file_path", "")
+                    interrupt_payload.setdefault("original_code", "")
+                    interrupt_payload.setdefault("refactored_code", "")
                     interrupt_payload["approval_id"] = runtime_sessions.begin_approval(
                         request.thread_id, session_token, run_id
                     )

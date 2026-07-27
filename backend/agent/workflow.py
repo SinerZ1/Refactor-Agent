@@ -130,8 +130,12 @@ def get_checkpointer():
 
             from langgraph.checkpoint.redis import RedisSaver
 
-            saver = RedisSaver(redis_url=redis_url)
-            print("[Checkpointer] Redis 连接成功。成功加载 RedisSaver 持久化记忆。")
+            saver = RedisSaver(redis_url=redis_url, redis_client=client)
+            if hasattr(saver, "setup") and callable(getattr(saver, "setup")):
+                saver.setup()
+            print(
+                "[Checkpointer] Redis 连接与 setup 成功。成功加载 RedisSaver 持久化记忆。"
+            )
             return saver
         except Exception as e:
             print(

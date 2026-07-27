@@ -139,8 +139,17 @@ const initWebSocket = () => {
 
       if (data.type === 'approval_request') {
         // 挂起状态，显示 HITL 审批弹窗
-        approvalPayload.value = data.payload
-        isApprovalModalOpen.value = true
+        const payload = parseApprovalPayload(data.payload)
+        if (payload) {
+          approvalPayload.value = payload
+          isApprovalModalOpen.value = true
+        } else {
+          agentLogs.value.push({
+            type: 'error',
+            message: '收到 WebSocket 审批请求但数据缺失',
+            time: new Date().toLocaleTimeString(),
+          })
+        }
       } else if (data.type === 'approval_confirmed') {
         // 审批结果确认，隐藏弹窗，发起新的 SSE 重构流请求进行恢复
         isApprovalModalOpen.value = false
