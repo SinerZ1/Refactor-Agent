@@ -1276,8 +1276,8 @@ const handleSendChatMessage = () => {
 }
 
 :deep(.bubble-markdown pre) {
-  background-color: rgba(0, 0, 0, 0.3);
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  background-color: var(--code-pre-bg, #f5f5f5);
+  border: var(--code-pre-border, 1px solid #ccc);
   border-radius: 6px;
   padding: 0.6rem 0.8rem;
   margin: 0.5em 0;
@@ -1290,7 +1290,7 @@ const handleSendChatMessage = () => {
 :deep(.bubble-markdown code) {
   font-family: 'Fira Code', 'Courier New', monospace;
   font-size: 0.9em;
-  background-color: rgba(0, 0, 0, 0.2);
+  background-color: var(--code-inline-bg, #f8f9fa);
   padding: 0.15em 0.35em;
   border-radius: 4px;
 }
@@ -1941,6 +1941,9 @@ const handleSendChatMessage = () => {
   --original-title: #fee2e2;
   --modified-bg: #f0fdf7;
   --modified-title: #d1fae5;
+  --code-pre-bg: #f5f5f5;
+  --code-pre-border: 1px solid #ccc;
+  --code-inline-bg: #f8f9fa;
 }
 
 .app-container[data-theme='dark'] {
@@ -1989,6 +1992,9 @@ const handleSendChatMessage = () => {
   --original-title: #46232c;
   --modified-bg: #122820;
   --modified-title: #174333;
+  --code-pre-bg: rgba(0, 0, 0, 0.3);
+  --code-pre-border: 1px solid rgba(255, 255, 255, 0.12);
+  --code-inline-bg: rgba(0, 0, 0, 0.2);
 }
 
 :global(html),
