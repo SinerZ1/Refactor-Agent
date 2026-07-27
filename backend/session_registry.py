@@ -3,8 +3,8 @@ import hmac
 import secrets
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 
 class SessionRegistryError(RuntimeError):

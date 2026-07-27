@@ -71,7 +71,7 @@ def read_code_file(file_path: str) -> tuple[str, dict]:
             return f.read(), {"success": True, "file_path": file_path}
     except Exception as e:
         return (
-            f"读取文件失败: {str(e)}",
+            f"读取文件失败: {e!s}",
             {"success": False, "file_path": file_path, "failure_kind": "read_error"},
         )
 
@@ -191,7 +191,7 @@ def write_code_file(
         raise
     except Exception as e:
         return tool_result(
-            f"写入文件失败: {str(e)}",
+            f"写入文件失败: {e!s}",
             success=False,
             failure_kind="write_error",
         )
@@ -276,6 +276,7 @@ def run_unit_tests(
             errors="replace",
             timeout=60,
             cwd=get_project_root(),
+            check=False,
         )
         output = (result.stdout or "").strip() + "\n" + (result.stderr or "").strip()
         output = output.strip()
@@ -293,7 +294,7 @@ def run_unit_tests(
         )
     except Exception as e:
         return (
-            f"运行测试失败: {str(e)}",
+            f"运行测试失败: {e!s}",
             {
                 "success": False,
                 "test_suite": test_suite,
@@ -344,7 +345,7 @@ def query_neo4j_topology() -> tuple[str, dict]:
         }
     except Exception as e:
         return (
-            f"查询 Neo4j 拓扑图谱失败: {str(e)}",
+            f"查询 Neo4j 拓扑图谱失败: {e!s}",
             {"success": False, "failure_kind": "topology_query_error"},
         )
 

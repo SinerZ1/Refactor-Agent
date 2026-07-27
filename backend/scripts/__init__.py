@@ -26,7 +26,7 @@ def run_command(
     command_env.update(env_overrides or {})
     print(f"[Script Launcher] Executing command in {cwd_dir}: {' '.join(cmd)}")
     try:
-        res = subprocess.run(cmd, cwd=cwd_dir, env=command_env)
+        res = subprocess.run(cmd, cwd=cwd_dir, env=command_env, check=False)
         sys.exit(res.returncode)
     except Exception as e:
         print(f"[Script Launcher] Error executing command: {e}")

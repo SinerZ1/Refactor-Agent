@@ -46,19 +46,7 @@ def test_graph_uses_stable_ids_and_resolves_same_class_calls(tmp_path: Path):
     source_root = tmp_path / "CodeSmells"
     _write_source(
         source_root / "workers.py",
-        "\n".join(
-            [
-                "class Alpha:",
-                "    def run(self):",
-                "        return 1",
-                "    def execute(self):",
-                "        return self.run()",
-                "",
-                "class Beta:",
-                "    def run(self):",
-                "        return 2",
-            ]
-        ),
+        "class Alpha:\n    def run(self):\n        return 1\n    def execute(self):\n        return self.run()\n\nclass Beta:\n    def run(self):\n        return 2",
     )
 
     symbols, calls = parse_code_to_graph(source_root)
@@ -73,16 +61,7 @@ def test_class_symbol_does_not_duplicate_method_calls(tmp_path: Path):
     source_root = tmp_path / "CodeSmells"
     _write_source(
         source_root / "service.py",
-        "\n".join(
-            [
-                "def helper():",
-                "    return 1",
-                "",
-                "class Service:",
-                "    def execute(self):",
-                "        return helper()",
-            ]
-        ),
+        "def helper():\n    return 1\n\nclass Service:\n    def execute(self):\n        return helper()",
     )
 
     symbols, calls = parse_code_to_graph(source_root)

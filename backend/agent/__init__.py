@@ -40,7 +40,7 @@ def simple_refactor(code: str, config: RunnableConfig | None = None) -> str:
         final_state = app_graph.invoke(initial_state, run_config)
         return get_message_text(final_state["messages"][-1].content)
     except Exception as e:
-        return f"# [运行失败]\n# 错误信息: {str(e)}"
+        return f"# [运行失败]\n# 错误信息: {e!s}"
 
 
 def stream_refactor(
@@ -368,7 +368,7 @@ def stream_refactor(
     except Exception as e:
         yield make_agent_event(
             "run.failed",
-            f"重构工作流运行失败: {str(e)}",
+            f"重构工作流运行失败: {e!s}",
             level="error",
             node="workflow",
             success=False,
