@@ -38,11 +38,10 @@ def simple_refactor(code: str, config: RunnableConfig | None = None) -> str:
         "budget_exceeded": False,
         "budget_reason": None,
     }
-    try:
-        final_state = app_graph.invoke(initial_state, run_config)
-        return get_message_text(final_state["messages"][-1].content)
-    except Exception as e:
-        return f"# [运行失败]\n# 错误信息: {e!s}"
+    # 同步兼容函数若仍被 Python 调用方使用，异常必须保持异常语义。把失败文本
+    # 当作“重构结果”会让 HTTP/任务编排层误判成功，也会绕开 HITL 的状态契约。
+    final_state = app_graph.invoke(initial_state, run_config)
+    return get_message_text(final_state["messages"][-1].content)
 
 
 def stream_refactor(

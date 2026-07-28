@@ -1,4 +1,5 @@
 import os
+from urllib.parse import urlsplit, urlunsplit
 
 from dotenv import load_dotenv
 from langgraph.checkpoint.memory import MemorySaver
@@ -23,6 +24,12 @@ from .tools import architect_tools, developer_tools, reviewer_tools
 
 # 确保在工作流定义与 checkpointer 初始化前加载环境变量
 load_dotenv()
+
+_checkpointer_health = {
+    "status": "degraded",
+    "backend": "memory",
+    "reason": "not_configured",
+}
 
 # ============================================================
 # 教学说明: 状态图装配层 (StateGraph Assembly) 与持久化 Checkpointer
@@ -103,6 +110,28 @@ workflow.add_edge("finalize_review_success", END)
 workflow.add_edge("finalize_review_failure", END)
 
 
+def _safe_connection_url(connection_url: str) -> str:
+    """仅保留定位服务所需的信息，用户名、口令和查询参数永不进入日志。"""
+
+    try:
+        parsed = urlsplit(connection_url)
+        hostname = parsed.hostname or "<unknown>"
+        if ":" in hostname:
+            hostname = f"[{hostname}]"
+        netloc = hostname
+        if parsed.port is not None:
+            netloc = f"{netloc}:{parsed.port}"
+        return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
+    except ValueError:
+        return "<invalid Redis URL>"
+
+
+def get_checkpointer_health() -> dict[str, str]:
+    """返回副本，避免健康检查调用方覆写进程级组件状态。"""
+
+    return dict(_checkpointer_health)
+
+
 def get_checkpointer():
     """
     持久化记忆存储器适配方法。
@@ -114,12 +143,14 @@ def get_checkpointer():
         if redis_url.startswith("http://"):
             redis_url = redis_url.replace("http://", "redis://", 1)
             print(
-                f"[Warning] 检测到 REDIS_URL 使用了错误协议头 http://，已防御性自动修正为: {redis_url}"
+                "[Warning] 检测到 REDIS_URL 使用了错误协议头 http://，"
+                f"已防御性自动修正为: {_safe_connection_url(redis_url)}"
             )
         elif redis_url.startswith("https://"):
             redis_url = redis_url.replace("https://", "rediss://", 1)
             print(
-                f"[Warning] 检测到 REDIS_URL 使用了错误协议头 https://，已防御性自动修正为: {redis_url}"
+                "[Warning] 检测到 REDIS_URL 使用了错误协议头 https://，"
+                f"已防御性自动修正为: {_safe_connection_url(redis_url)}"
             )
 
         try:
@@ -136,12 +167,25 @@ def get_checkpointer():
             print(
                 "[Checkpointer] Redis 连接与 setup 成功。成功加载 RedisSaver 持久化记忆。"
             )
+            _checkpointer_health.update(
+                status="ok", backend="redis", reason="available"
+            )
             return saver
-        except Exception as e:
+        except Exception as exc:
+            _checkpointer_health.update(
+                status="degraded",
+                backend="memory",
+                reason=f"redis_unavailable:{exc.__class__.__name__}",
+            )
             print(
-                f"[Checkpointer] Redis 连接或初始化失败 (URL: {redis_url}): {e}。将降级使用 MemorySaver。"
+                "[Checkpointer] Redis 连接或初始化失败 "
+                f"(URL: {_safe_connection_url(redis_url)}, "
+                f"错误类型: {exc.__class__.__name__})。将降级使用 MemorySaver。"
             )
     else:
+        _checkpointer_health.update(
+            status="degraded", backend="memory", reason="not_configured"
+        )
         print("[Checkpointer] 未配置 REDIS_URL，当前使用的是 MemorySaver 记忆方案。")
     return MemorySaver()
 

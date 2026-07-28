@@ -14,10 +14,13 @@ from code_indexer import (
 
 load_dotenv()
 
-NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
-NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
-NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "password")
 NEO4J_PROJECT_ID = os.getenv("NEO4J_PROJECT_ID", "refactor-agent")
+
+_neo4j_health = {
+    "status": "degraded",
+    "backend": "ast",
+    "reason": "not_configured",
+}
 
 
 class GraphSymbol(TypedDict):
@@ -37,13 +40,39 @@ class TopologyData(TypedDict):
 
 
 def get_neo4j_driver():
+    neo4j_uri = os.getenv("NEO4J_URI", "bolt://localhost:7687").strip()
+    neo4j_user = os.getenv("NEO4J_USER", "").strip()
+    neo4j_password = os.getenv("NEO4J_PASSWORD", "")
+    if not neo4j_user or not neo4j_password:
+        _neo4j_health.update(
+            status="degraded", backend="ast", reason="credentials_not_configured"
+        )
+        print("[Neo4j] 未配置用户名或密码，使用内存 AST 调用图。")
+        return None
+    driver = None
     try:
-        driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
+        driver = GraphDatabase.driver(
+            neo4j_uri,
+            auth=(neo4j_user, neo4j_password),
+        )
         driver.verify_connectivity()
+        _neo4j_health.update(status="ok", backend="neo4j", reason="available")
         return driver
     except Exception as exc:
-        print(f"[Neo4j] 连接失败: {exc}. 请确保 Neo4j 正在运行并且配置正确。")
+        _neo4j_health.update(
+            status="degraded",
+            backend="ast",
+            reason=f"neo4j_unavailable:{exc.__class__.__name__}",
+        )
+        # 驱动异常可能复述认证 URI；日志只保留异常类型，避免口令被拼入输出。
+        print(f"[Neo4j] 连接失败 ({exc.__class__.__name__})，使用内存 AST 调用图。")
+        if driver is not None:
+            driver.close()
         return None
+
+
+def get_neo4j_health() -> dict[str, str]:
+    return dict(_neo4j_health)
 
 
 class _GraphSymbolVisitor(ast.NodeVisitor):
@@ -245,7 +274,12 @@ def index_to_neo4j(directory_path: str | Path = "CodeSmells") -> bool:
         print(f"[Neo4j] 成功写入 {len(symbols)} 个符号，{len(calls)} 条调用关系。")
         return True
     except Exception as exc:
-        print(f"[Neo4j] 写入图谱数据失败: {exc}")
+        _neo4j_health.update(
+            status="degraded",
+            backend="ast",
+            reason=f"neo4j_write_failed:{exc.__class__.__name__}",
+        )
+        print(f"[Neo4j] 写入图谱数据失败 ({exc.__class__.__name__})，保留 AST 降级。")
         return False
     finally:
         driver.close()
@@ -305,7 +339,12 @@ def get_topology_data() -> TopologyData:
                 for record in result
             )
     except Exception as exc:
-        print(f"[Neo4j] 获取拓扑图谱失败: {exc}")
+        _neo4j_health.update(
+            status="degraded",
+            backend="ast",
+            reason=f"neo4j_query_failed:{exc.__class__.__name__}",
+        )
+        print(f"[Neo4j] 获取拓扑图谱失败 ({exc.__class__.__name__})，返回 AST 图。")
         return _fallback_topology()
     finally:
         driver.close()

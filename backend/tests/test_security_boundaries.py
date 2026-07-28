@@ -50,7 +50,7 @@ def test_graph_config_replaces_api_key_with_opaque_reference():
             "model_config": {
                 "provider": "openai",
                 "api_key": "unit-test-secret",
-                "base_url": "https://example.test",
+                "base_url": "https://1.1.1.1",
                 "model_name": "test-model",
             },
         }

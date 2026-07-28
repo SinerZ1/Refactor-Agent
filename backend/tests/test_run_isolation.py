@@ -11,6 +11,11 @@ from agent.events import make_agent_event
 from session_registry import RunStateError, runtime_sessions
 
 
+class _ConnectedRequest:
+    async def is_disconnected(self):
+        return False
+
+
 def _collect_sse(response) -> list[dict]:
     async def collect() -> list[dict]:
         events = []
@@ -50,9 +55,10 @@ def test_stream_run_lease_rejects_overlap_and_scopes_every_event(monkeypatch):
     monkeypatch.setattr(agent, "app_graph", FakeGraph())
     monkeypatch.setattr(app_module, "stream_refactor", fake_stream)
 
-    first_response = app_module.refactor_code_stream(request)
+    http_request = _ConnectedRequest()
+    first_response = app_module.refactor_code_stream(request, http_request)
     with pytest.raises(HTTPException) as conflict:
-        app_module.refactor_code_stream(request)
+        app_module.refactor_code_stream(request, http_request)
     assert conflict.value.status_code == 409
 
     first_events = _collect_sse(first_response)
@@ -66,7 +72,7 @@ def test_stream_run_lease_rejects_overlap_and_scopes_every_event(monkeypatch):
             credentials.thread_id, credentials.session_token
         )
 
-    second_events = _collect_sse(app_module.refactor_code_stream(request))
+    second_events = _collect_sse(app_module.refactor_code_stream(request, http_request))
     assert second_events[0]["run_id"] != first_run_id
 
 
@@ -105,7 +111,10 @@ def test_hitl_resume_keeps_run_identity_until_terminal_state(monkeypatch):
     monkeypatch.setattr(agent, "app_graph", FakeGraph())
     monkeypatch.setattr(app_module, "stream_refactor", fake_stream)
 
-    suspended_events = _collect_sse(app_module.refactor_code_stream(request))
+    http_request = _ConnectedRequest()
+    suspended_events = _collect_sse(
+        app_module.refactor_code_stream(request, http_request)
+    )
     waiting_event = next(
         event for event in suspended_events if event["type"] == "approval.waiting"
     )
@@ -125,7 +134,9 @@ def test_hitl_resume_keeps_run_identity_until_terminal_state(monkeypatch):
             approved=True,
         ),
     )
-    resumed_events = _collect_sse(app_module.refactor_code_stream(request))
+    resumed_events = _collect_sse(
+        app_module.refactor_code_stream(request, http_request)
+    )
 
     assert lifecycle["resumed"] is True
     assert all(event["run_id"] == run_id for event in resumed_events)

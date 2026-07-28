@@ -9,14 +9,18 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
+from urllib.parse import quote
 
 import httpx
 from google import genai
 from google.auth import load_credentials_from_file
 from google.auth.exceptions import GoogleAuthError
+
+from network_security import ModelBaseUrlError, validate_model_base_url
 
 Provider = Literal["openai", "gemini_studio", "google_vertex"]
 AuthMode = Literal["adc", "api_key"]
@@ -125,7 +129,32 @@ def inspect_adc_file() -> AdcInspection:
     return AdcInspection(available=False, message="未找到有效 ADC 凭据文件")
 
 
-def _provider_error(response: httpx.Response) -> str:
+def _redact_provider_message(message: str, *secrets: str) -> str:
+    """清理供应商错误中的凭据与本机绝对路径后再跨信任边界返回。"""
+
+    redacted = message
+    for secret in secrets:
+        if not secret:
+            continue
+        redacted = redacted.replace(secret, "***")
+        encoded = quote(secret, safe="")
+        if encoded != secret:
+            redacted = redacted.replace(encoded, "***")
+    # SDK 错误可能携带 ADC 或证书路径；客户端只需要错误类别，不需要服务器布局。
+    redacted = re.sub(
+        r"(?i)(?:[a-z]:[\\/](?:[^ \r\n:;\"']+[\\/])*[^ \r\n:;\"']+)",
+        "<local-path>",
+        redacted,
+    )
+    redacted = re.sub(
+        r"(?<![\w.])/(?:[^ \r\n:;\"']+/)+[^ \r\n:;\"']+",
+        "<local-path>",
+        redacted,
+    )
+    return redacted
+
+
+def _provider_error(response: httpx.Response, *secrets: str) -> str:
     try:
         payload = response.json()
     except ValueError:
@@ -134,11 +163,11 @@ def _provider_error(response: httpx.Response) -> str:
     if isinstance(payload, dict):
         error = payload.get("error")
         if isinstance(error, dict) and isinstance(error.get("message"), str):
-            return error["message"]
+            return _redact_provider_message(error["message"], *secrets)
         if isinstance(error, str):
-            return error
+            return _redact_provider_message(error, *secrets)
         if isinstance(payload.get("message"), str):
-            return payload["message"]
+            return _redact_provider_message(payload["message"], *secrets)
     return response.reason_phrase or "供应商拒绝了连接请求"
 
 
@@ -147,6 +176,7 @@ async def _request_json(
     *,
     headers: dict[str, str] | None = None,
     params: dict[str, str | int] | None = None,
+    secrets: tuple[str, ...] = (),
 ) -> dict:
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
@@ -156,7 +186,8 @@ async def _request_json(
 
     if not response.is_success:
         raise ModelCatalogError(
-            f"连接失败（HTTP {response.status_code}）：{_provider_error(response)}"
+            f"连接失败（HTTP {response.status_code}）："
+            f"{_provider_error(response, *secrets)}"
         )
     try:
         payload = response.json()
@@ -170,12 +201,15 @@ async def _request_json(
 async def _list_openai_models(config: ModelConnectionConfig) -> list[str]:
     if not config.api_key.strip():
         raise ModelCatalogError("请填写 API Key")
-    if not config.base_url.strip():
-        raise ModelCatalogError("请填写 Base URL")
+    try:
+        base_url = validate_model_base_url(config.base_url)
+    except ModelBaseUrlError as exc:
+        raise ModelCatalogError(str(exc)) from exc
 
     payload = await _request_json(
-        f"{config.base_url.rstrip('/')}/models",
+        f"{base_url.rstrip('/')}/models",
         headers={"Authorization": f"Bearer {config.api_key.strip()}"},
+        secrets=(config.api_key.strip(),),
     )
     data = payload.get("data")
     if not isinstance(data, list):
@@ -196,6 +230,7 @@ async def _list_gemini_models(config: ModelConnectionConfig) -> list[str]:
     payload = await _request_json(
         "https://generativelanguage.googleapis.com/v1beta/models",
         params={"key": config.api_key.strip(), "pageSize": 1000},
+        secrets=(config.api_key.strip(),),
     )
     models = payload.get("models")
     if not isinstance(models, list):
@@ -253,9 +288,7 @@ def _list_vertex_models_sync(config: ModelConnectionConfig) -> list[str]:
         raise
     except Exception as exc:
         # SDK 异常往往包含认证或 IAM 细节；保留可操作信息，但不回传凭据内容。
-        message = (
-            str(exc).replace(config.api_key, "***") if config.api_key else str(exc)
-        )
+        message = _redact_provider_message(str(exc), config.api_key)
         raise ModelCatalogError(f"Vertex AI 连接失败：{message}") from exc
     finally:
         if client:

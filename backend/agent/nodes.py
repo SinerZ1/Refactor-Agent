@@ -8,6 +8,8 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
 
+from network_security import validate_model_base_url
+
 from .budgets import (
     account_agent_response,
     budget_preflight_reason,
@@ -73,6 +75,7 @@ def get_llm_from_config(config: RunnableConfig):
             cfg.get("base_url")
             or os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
         )
+        base_url = validate_model_base_url(base_url)
         return ChatOpenAI(
             api_key=SecretStr(api_key),
             base_url=base_url,
@@ -143,6 +146,7 @@ def get_llm_from_config(config: RunnableConfig):
         else:
             api_key = os.getenv("OPENAI_API_KEY", "")
             base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+            base_url = validate_model_base_url(base_url)
             return ChatOpenAI(
                 api_key=SecretStr(api_key),
                 base_url=base_url,

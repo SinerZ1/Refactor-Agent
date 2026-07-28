@@ -9,8 +9,8 @@ from model_catalog import ModelConnectionConfig
 def test_openai_catalog_normalizes_standard_model_response(monkeypatch):
     captured = {}
 
-    async def fake_request(url, *, headers=None, params=None):
-        captured.update(url=url, headers=headers, params=params)
+    async def fake_request(url, *, headers=None, params=None, secrets=()):
+        captured.update(url=url, headers=headers, params=params, secrets=secrets)
         return {
             "data": [
                 {"id": "deepseek-v4-pro"},
@@ -32,13 +32,15 @@ def test_openai_catalog_normalizes_standard_model_response(monkeypatch):
 
     assert captured["url"] == "https://api.deepseek.com/models"
     assert captured["headers"] == {"Authorization": "Bearer secret"}
+    assert captured["secrets"] == ("secret",)
     assert models == ["deepseek-v4-flash", "deepseek-v4-pro"]
 
 
 def test_gemini_catalog_keeps_generate_content_models(monkeypatch):
-    async def fake_request(url, *, headers=None, params=None):
+    async def fake_request(url, *, headers=None, params=None, secrets=()):
         assert url == "https://generativelanguage.googleapis.com/v1beta/models"
         assert params == {"key": "secret", "pageSize": 1000}
+        assert secrets == ("secret",)
         return {
             "models": [
                 {
@@ -115,3 +117,24 @@ def test_vertex_api_key_uses_express_mode_without_project_or_location(monkeypatc
 
     assert models == ["gemini-3.5-flash"]
     assert captured == {"vertexai": True, "api_key": "secret", "closed": True}
+
+
+def test_provider_error_redacts_api_key_and_local_path():
+    response = SimpleNamespace(
+        json=lambda: {
+            "error": {
+                "message": (
+                    "invalid key unit-test-secret from "
+                    "C:\\Users\\developer\\credentials.json"
+                )
+            }
+        },
+        reason_phrase="Bad Request",
+    )
+
+    message = model_catalog._provider_error(response, "unit-test-secret")
+
+    assert "unit-test-secret" not in message
+    assert "C:\\Users\\developer" not in message
+    assert "***" in message
+    assert "<local-path>" in message

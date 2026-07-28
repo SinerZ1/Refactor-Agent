@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Literal
@@ -8,12 +9,12 @@ from urllib.parse import urlsplit
 
 import uvicorn
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from langchain_core.runnables import RunnableConfig
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 from agent.budgets import (
     DEFAULT_MAX_AGENT_STEPS,
@@ -23,14 +24,20 @@ from agent.budgets import (
 )
 from agent.credentials import runtime_credentials
 from agent.events import AgentEvent, make_agent_event
-from agent_core import simple_refactor, stream_refactor
+from agent.workflow import get_checkpointer_health
+from agent_core import stream_refactor
 from code_indexer import index_directory
-from graph_indexer import get_topology_data, index_to_neo4j
+from graph_indexer import get_neo4j_health, get_topology_data, index_to_neo4j
 from model_catalog import (
     ModelCatalogError,
     ModelConnectionConfig,
     inspect_adc_file,
     list_available_models,
+)
+from network_security import (
+    ModelBaseUrlError,
+    validate_base_url_syntax,
+    validate_model_base_url,
 )
 from session_registry import (
     ApprovalStateError,
@@ -43,6 +50,7 @@ from session_registry import (
 load_dotenv()
 
 main_loop: asyncio.AbstractEventLoop | None = None
+SSE_HEARTBEAT_SECONDS = 15.0
 
 
 @asynccontextmanager
@@ -227,6 +235,13 @@ class RuntimeModelConfig(BaseModel):
     vertex_model_name: str = ""
     vertex_auth_mode: Literal["adc", "api_key"] = "adc"
 
+    @field_validator("base_url")
+    @classmethod
+    def validate_base_url_structure(cls, value: str) -> str:
+        if not value.strip():
+            return value
+        return validate_base_url_syntax(value)
+
 
 class RunBudgetConfig(BaseModel):
     """单次 Graph 运行的硬预算；边界校验防止关闭护栏或制造异常大 Checkpoint。"""
@@ -260,12 +275,6 @@ class RefactorRequest(BaseModel):
     session_token: SecretStr = SecretStr("")
 
 
-# 定义返回的数据模型
-class RefactorResponse(BaseModel):
-    original_code: str
-    refactored_code: str
-
-
 class ModelConnectionRequest(BaseModel):
     """连接测试的最小配置，不写日志、不落盘，也不进入 Agent Graph State。"""
 
@@ -275,6 +284,13 @@ class ModelConnectionRequest(BaseModel):
     project_id: str = ""
     location: str = "global"
     auth_mode: Literal["adc", "api_key"] = "adc"
+
+    @field_validator("base_url")
+    @classmethod
+    def validate_base_url_structure(cls, value: str) -> str:
+        if not value.strip():
+            return value
+        return validate_base_url_syntax(value)
 
 
 class ModelConnectionResponse(BaseModel):
@@ -309,7 +325,15 @@ def build_graph_config(
     credential_ref: str | None = None
     if request.custom_model_config:
         model_settings = request.custom_model_config
+        if model_settings.provider == "openai" and model_settings.base_url.strip():
+            try:
+                validated_base_url = validate_model_base_url(model_settings.base_url)
+            except ModelBaseUrlError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+        else:
+            validated_base_url = model_settings.base_url
         configurable.update(model_settings.model_dump(exclude={"api_key"}))
+        configurable["base_url"] = validated_base_url
         credential_ref = runtime_credentials.store(
             model_settings.api_key.get_secret_value()
         )
@@ -340,7 +364,15 @@ def read_root():
 
 @app.get("/api/health")
 def health_check():
-    return {"status": "ok"}
+    # Redis/Neo4j 是可选能力：降级需要可见，但不应把仍可工作的 API 误报为宕机。
+    return {
+        "status": "ok",
+        "components": {
+            "service": {"status": "ok"},
+            "redis": get_checkpointer_health(),
+            "neo4j": get_neo4j_health(),
+        },
+    }
 
 
 @app.post("/api/sessions", response_model=SessionResponse)
@@ -393,31 +425,8 @@ async def connect_model_provider(request: ModelConnectionRequest):
     )
 
 
-@app.post("/api/refactor", response_model=RefactorResponse)
-def refactor_code(request: RefactorRequest):
-    """
-    接收代码，调用 Agent 进行简单重构
-    """
-    session_token = authorize_refactor_request(request)
-    config, credential_ref = build_graph_config(request)
-    try:
-        run_id = runtime_sessions.begin_run(request.thread_id, session_token)
-    except RunStateError as exc:
-        runtime_credentials.revoke(credential_ref)
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    try:
-        refactored_result = simple_refactor(request.code, config)
-    finally:
-        runtime_sessions.finish_run(request.thread_id, session_token, run_id)
-        runtime_credentials.revoke(credential_ref)
-
-    return RefactorResponse(
-        original_code=request.code, refactored_code=refactored_result
-    )
-
-
 @app.post("/api/refactor/stream")
-def refactor_code_stream(request: RefactorRequest):
+def refactor_code_stream(request: RefactorRequest, http_request: Request):
     """
     流式接收重构代码，返回 SSE (Server-Sent Events) 流
     """
@@ -442,9 +451,22 @@ def refactor_code_stream(request: RefactorRequest):
         runtime_credentials.revoke(credential_ref)
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    def event_generator():
+    async def event_generator():
+        event_loop = asyncio.get_running_loop()
+        event_queue: asyncio.Queue[object] = asyncio.Queue()
+        producer_finished = object()
+        stop_requested = threading.Event()
         stream_failed = False
         keep_run_open = False
+
+        def enqueue(item: object) -> None:
+            if stop_requested.is_set():
+                return
+            try:
+                event_loop.call_soon_threadsafe(event_queue.put_nowait, item)
+            except RuntimeError:
+                # ASGI 事件循环已关闭时丢弃迟到结果；凭据和租约由消费者 finally 释放。
+                stop_requested.set()
 
         async def send_run_chatroom_message(
             thread_id: str, sender: str, content: str
@@ -455,101 +477,159 @@ def refactor_code_stream(request: RefactorRequest):
             event["run_id"] = run_id
             return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
-        try:
-            for event in stream_refactor(
-                request.code,
-                request.thread_id,
-                config,
-                send_run_chatroom_message,
-                main_loop,
-            ):
-                # SSE 直接承载版本化事件；事件内保留 token 仅用于旧前端显示兼容。
-                stream_failed = stream_failed or event["type"] == "run.failed"
-                yield serialize_run_event(event)
-
-            # 阶段 2：执行完毕后，检查是否产生了新的挂起（Interrupt）
-            from agent import app_graph
-
+        def produce_events() -> None:
+            nonlocal keep_run_open, stream_failed
             try:
-                state = app_graph.get_state(config)
-                if state.interrupts:
-                    # 存在挂起中断（即 write_code_file 工具调用前暂停）
-                    raw_val = state.interrupts[0].value
-                    interrupt_payload = (
-                        dict(raw_val) if isinstance(raw_val, dict) else {}
-                    )
-                    interrupt_payload.setdefault("file_path", "")
-                    interrupt_payload.setdefault("original_code", "")
-                    interrupt_payload.setdefault("refactored_code", "")
-                    interrupt_payload["approval_id"] = runtime_sessions.begin_approval(
-                        request.thread_id, session_token, run_id
-                    )
-                    keep_run_open = True
-                    print(
-                        f"[app] Graph suspended on interrupt for `{request.thread_id}`. Sending WS message and SSE token."
-                    )
+                for event in stream_refactor(
+                    request.code,
+                    request.thread_id,
+                    config,
+                    send_run_chatroom_message,
+                    main_loop,
+                ):
+                    if stop_requested.is_set():
+                        return
+                    # SSE 直接承载版本化事件；heartbeat 只使用 SSE 注释帧，
+                    # 不进入版本化 AgentEvent 业务协议。
+                    stream_failed = stream_failed or event["type"] == "run.failed"
+                    enqueue(serialize_run_event(event))
 
-                    # 方案 A：通过 SSE 确保前端必定收到
-                    approval_event = make_agent_event(
-                        "approval.waiting",
-                        "等待用户确认文件写入",
-                        node="developer",
-                        tool="write_code_file",
-                        payload=interrupt_payload,
-                    )
-                    yield serialize_run_event(approval_event)
+                if stop_requested.is_set():
+                    return
 
-                    # 方案 B：同时尝试通过 WebSocket 发送（向下兼容）
-                    try:
-                        loop = main_loop
-                        if loop and loop.is_running():
-                            asyncio.run_coroutine_threadsafe(
-                                manager.send_personal_message(
-                                    {
-                                        "type": "approval_request",
-                                        "run_id": run_id,
-                                        "payload": interrupt_payload,
-                                    },
-                                    request.thread_id,
-                                ),
-                                loop,
+                # 阶段 2：执行完毕后，检查是否产生了新的挂起（Interrupt）
+                from agent import app_graph
+
+                try:
+                    state = app_graph.get_state(config)
+                    if state.interrupts:
+                        raw_val = state.interrupts[0].value
+                        interrupt_payload = (
+                            dict(raw_val) if isinstance(raw_val, dict) else {}
+                        )
+                        interrupt_payload.setdefault("file_path", "")
+                        interrupt_payload.setdefault("original_code", "")
+                        interrupt_payload.setdefault("refactored_code", "")
+                        interrupt_payload["approval_id"] = (
+                            runtime_sessions.begin_approval(
+                                request.thread_id, session_token, run_id
                             )
-                    except Exception as ex:
+                        )
+                        keep_run_open = True
                         print(
-                            f"[app] ERROR: Cannot send WS message using run_coroutine_threadsafe: {ex}"
+                            f"[app] Graph suspended on interrupt for `{request.thread_id}`."
                         )
-                else:
+                        enqueue(
+                            serialize_run_event(
+                                make_agent_event(
+                                    "approval.waiting",
+                                    "等待用户确认文件写入",
+                                    node="developer",
+                                    tool="write_code_file",
+                                    payload=interrupt_payload,
+                                )
+                            )
+                        )
+                        try:
+                            loop = main_loop
+                            if loop and loop.is_running():
+                                asyncio.run_coroutine_threadsafe(
+                                    manager.send_personal_message(
+                                        {
+                                            "type": "approval_request",
+                                            "run_id": run_id,
+                                            "payload": interrupt_payload,
+                                        },
+                                        request.thread_id,
+                                    ),
+                                    loop,
+                                )
+                        except Exception as exc:
+                            print(
+                                "[app] WebSocket approval notification failed "
+                                f"({exc.__class__.__name__})."
+                            )
+                    else:
+                        review_status = state.values.get("review_status")
+                        if review_status == "success" and not stream_failed:
+                            enqueue(
+                                serialize_run_event(
+                                    make_agent_event(
+                                        "run.completed",
+                                        "重构工作流已完成",
+                                        level="success",
+                                        node="workflow",
+                                        success=True,
+                                    )
+                                )
+                            )
+                        elif review_status == "failed" and not stream_failed:
+                            enqueue(
+                                serialize_run_event(
+                                    make_agent_event(
+                                        "run.failed",
+                                        "重构工作流未通过最终审查",
+                                        level="error",
+                                        node="workflow",
+                                        success=False,
+                                    )
+                                )
+                            )
+                except Exception as exc:
                     print(
-                        f"[app] No interrupts found for thread `{request.thread_id}` after stream_refactor."
+                        "[app] Failed to check state interrupts "
+                        f"({exc.__class__.__name__})."
                     )
-                    review_status = state.values.get("review_status")
-                    if review_status == "success" and not stream_failed:
-                        terminal_event = make_agent_event(
-                            "run.completed",
-                            "重构工作流已完成",
-                            level="success",
-                            node="workflow",
-                            success=True,
-                        )
-                        yield serialize_run_event(terminal_event)
-                    elif review_status == "failed" and not stream_failed:
-                        terminal_event = make_agent_event(
-                            "run.failed",
-                            "重构工作流未通过最终审查",
-                            level="error",
-                            node="workflow",
-                            success=False,
-                        )
-                        yield serialize_run_event(terminal_event)
-            except Exception as e:
-                print(f"[app] Failed to check state interrupts: {e}")
+            finally:
+                enqueue(producer_finished)
+
+        producer = threading.Thread(
+            target=produce_events,
+            name=f"sse-run-{run_id}",
+            daemon=True,
+        )
+        producer.start()
+
+        try:
+            while True:
+                if await http_request.is_disconnected():
+                    break
+                try:
+                    item = await asyncio.wait_for(
+                        event_queue.get(),
+                        timeout=SSE_HEARTBEAT_SECONDS,
+                    )
+                except TimeoutError:
+                    if await http_request.is_disconnected():
+                        break
+                    yield ": heartbeat\n\n"
+                    continue
+                if item is producer_finished:
+                    break
+                yield str(item)
         finally:
-            # 客户端断开时生成器也会进入 finally，避免凭据在内存中滞留到 TTL。
+            # 断连相当于取消当前状态机消费者：先阻止生产者投递后续事件，再释放
+            # 租约与短期凭据。HITL 挂起是唯一保留 run 租约的正常终止路径。
+            stop_requested.set()
             if not keep_run_open:
-                runtime_sessions.finish_run(request.thread_id, session_token, run_id)
+                try:
+                    runtime_sessions.finish_run(
+                        request.thread_id,
+                        session_token,
+                        run_id,
+                    )
+                except SessionAuthorizationError:
+                    pass
             runtime_credentials.revoke(credential_ref)
 
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.get("/api/graph/topology")
