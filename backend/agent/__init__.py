@@ -30,6 +30,8 @@ def simple_refactor(code: str, config: RunnableConfig | None = None) -> str:
         "review_protocol_errors": 0,
         "review_status": "running",
         "change_records": [],
+        "test_run_records": [],
+        "review_evidence": None,
         "refactor_plan": None,
         "plan_error": None,
         "run_usage": empty_run_usage(),
@@ -97,6 +99,8 @@ def stream_refactor(
                 review_protocol_errors=0,
                 review_status="running",
                 change_records=[],
+                test_run_records=[],
+                review_evidence=None,
                 refactor_plan=None,
                 plan_error=None,
                 run_usage=empty_run_usage(),
@@ -110,6 +114,8 @@ def stream_refactor(
                 review_protocol_errors=0,
                 review_status="running",
                 change_records=[],
+                test_run_records=[],
+                review_evidence=None,
                 refactor_plan=None,
                 plan_error=None,
                 run_usage=empty_run_usage(),
@@ -304,16 +310,7 @@ def stream_refactor(
                                     node=node_name,
                                 )
                             if node_name == "reviewer":
-                                if "【REFACTOR_SUCCESS】" in msg_text:
-                                    yield make_agent_event(
-                                        "review.passed",
-                                        "Reviewer 审查通过",
-                                        level="success",
-                                        node=node_name,
-                                        task_id=task_id,
-                                        success=True,
-                                    )
-                                elif "【REFACTOR_FAIL】" in msg_text:
+                                if "【REFACTOR_FAIL】" in msg_text:
                                     yield make_agent_event(
                                         "review.failed",
                                         "Reviewer 审查未通过",
@@ -341,10 +338,33 @@ def stream_refactor(
                 elif node_name == "reviewer_protocol_retry":
                     yield make_agent_event(
                         "run.retrying",
-                        "Reviewer 未返回规定的终态标记，正在请求其修正结论",
+                        "Reviewer 结论缺少有效协议或测试证据，正在请求其修正",
                         node="reviewer",
                         task_id="reviewer_task",
                     )
+                elif node_name == "finalize_review_success":
+                    if node_output.get("review_status") == "success":
+                        yield make_agent_event(
+                            "review.passed",
+                            "Reviewer 结构化证据门禁验证通过",
+                            level="success",
+                            node="reviewer",
+                            task_id="reviewer_task",
+                            success=True,
+                            payload={
+                                "evidence": node_output.get("review_evidence") or {}
+                            },
+                        )
+                    else:
+                        for msg in node_output.get("messages", []):
+                            yield make_agent_event(
+                                "review.failed",
+                                get_message_text(msg.content),
+                                level="error",
+                                node="reviewer",
+                                task_id="reviewer_task",
+                                success=False,
+                            )
                 elif node_name == "finalize_review_failure":
                     for msg in node_output.get("messages", []):
                         yield make_agent_event(

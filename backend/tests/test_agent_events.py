@@ -1,10 +1,35 @@
 from types import SimpleNamespace
 
 from langchain_core.messages import AIMessage, ToolMessage
+from langgraph.graph import END, START, StateGraph
+from langgraph.prebuilt import ToolNode
 
 import agent
 import agent.tools as agent_tools
 from agent.events import make_agent_event
+from agent.state import State
+
+
+def _invoke_test_tool(test_suite: str):
+    tool_call = {
+        "name": "run_unit_tests",
+        "args": {"test_suite": test_suite},
+        "id": "test-call",
+        "type": "tool_call",
+    }
+    graph_builder = StateGraph(State)
+    graph_builder.add_node("tools", ToolNode([agent_tools.run_unit_tests]))
+    graph_builder.add_edge(START, "tools")
+    graph_builder.add_edge("tools", END)
+    graph = graph_builder.compile()
+    return graph.invoke(
+        {
+            "messages": [AIMessage(content="", tool_calls=[tool_call])],
+            "retry_count": 0,
+            "change_records": [],
+            "test_run_records": [],
+        }
+    )
 
 
 def test_event_envelope_keeps_legacy_token_without_hiding_semantics():
@@ -34,18 +59,13 @@ def test_unit_test_tool_marks_nonzero_exit_as_domain_failure(monkeypatch):
         ),
     )
 
-    message = agent_tools.run_unit_tests.invoke(
-        {
-            "name": "run_unit_tests",
-            "args": {"test_suite": "backend"},
-            "id": "test-call",
-            "type": "tool_call",
-        }
-    )
+    result = _invoke_test_tool("backend")
+    message = result["messages"][-1]
 
     assert isinstance(message, ToolMessage)
     assert message.artifact["success"] is False
     assert message.artifact["exit_code"] == 1
+    assert result["test_run_records"][-1]["success"] is False
 
 
 def test_read_tool_marks_rejected_path_as_domain_failure():
@@ -182,3 +202,38 @@ def test_stream_exposes_usage_and_budget_exhaustion_as_structured_events(monkeyp
     assert usage_event["payload"]["usage"]["total_tokens"] == 1000
     assert exceeded_event["success"] is False
     assert exceeded_event["payload"]["reason"] == "Agent 步数达到上限"
+
+
+def test_stream_emits_review_pass_only_after_evidence_terminal(monkeypatch):
+    evidence = {
+        "changed_files": ["CodeSmells/example.py"],
+        "change_set_digest": "current-digest",
+        "test_suite": "CodeSmells",
+        "test_success": True,
+        "test_exit_code": 0,
+    }
+
+    class FakeGraph:
+        def get_state(self, _config):
+            return SimpleNamespace(values={}, interrupts=())
+
+        def stream(self, *_args, **_kwargs):
+            yield {
+                "reviewer": {
+                    "messages": [AIMessage(content="【REFACTOR_SUCCESS】模型声明通过")]
+                }
+            }
+            yield {
+                "finalize_review_success": {
+                    "review_status": "success",
+                    "review_evidence": evidence,
+                }
+            }
+
+    monkeypatch.setattr(agent, "app_graph", FakeGraph())
+
+    events = list(agent.stream_refactor("CodeSmells/main.py", "evidence-event-test"))
+    passed_events = [event for event in events if event["type"] == "review.passed"]
+
+    assert len(passed_events) == 1
+    assert passed_events[0]["payload"]["evidence"] == evidence

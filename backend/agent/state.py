@@ -1,3 +1,5 @@
+import hashlib
+import json
 from typing import Annotated, Any, Literal, NotRequired, TypedDict
 
 from langchain_core.messages import BaseMessage
@@ -16,6 +18,7 @@ from .plans import RefactorPlan
 
 
 MAX_CHANGE_RECORDS = 12
+MAX_TEST_RUN_RECORDS = 12
 
 
 class ChangeRecord(TypedDict):
@@ -30,6 +33,26 @@ class ChangeRecord(TypedDict):
     diff_truncated: bool
 
 
+class TestRunRecord(TypedDict):
+    """Reviewer 工具生成的测试事实；摘要把结果绑定到精确的变更集合。"""
+
+    suite: str
+    success: bool
+    exit_code: int
+    change_set_digest: str
+    output_excerpt: str
+
+
+class ReviewEvidence(TypedDict):
+    """成功终态保留的最小证据清单，供 API、UI 与后续审计直接消费。"""
+
+    changed_files: list[str]
+    change_set_digest: str
+    test_suite: str
+    test_success: bool
+    test_exit_code: int
+
+
 def merge_change_records(
     existing: list[ChangeRecord], updates: list[ChangeRecord]
 ) -> list[ChangeRecord]:
@@ -39,7 +62,69 @@ def merge_change_records(
     同时只保留最近若干次写入，避免长会话把 Redis/MemorySaver 快照无限放大。
     """
 
+    # 新一轮运行会显式传入空列表。把它解释为“清空本轮事实”，避免 Redis
+    # Checkpoint 中上一轮写入被误当成当前任务证据；普通节点不返回该字段，因此不会误清空。
+    if not updates:
+        return []
     return (existing + updates)[-MAX_CHANGE_RECORDS:]
+
+
+def merge_test_run_records(
+    existing: list[TestRunRecord], updates: list[TestRunRecord]
+) -> list[TestRunRecord]:
+    """追加有界测试审计记录，并允许新一轮运行显式清空旧证据。"""
+
+    if not updates:
+        return []
+    return (existing + updates)[-MAX_TEST_RUN_RECORDS:]
+
+
+def compute_change_set_digest(change_records: list[ChangeRecord]) -> str:
+    """计算当前有界写入序列的稳定摘要。
+
+    摘要包含每次成功写入的路径与前后哈希，而不是只看最终文件内容。因此 Developer
+    即使再次写入相同内容，写入序列也会变化，先前测试记录随即因摘要不匹配而失效。
+    这相当于把测试证据绑定到不可变构建产物，而不是绑定到模型的自然语言声明。
+    """
+
+    digest_payload = [
+        {
+            "file_path": record["file_path"],
+            "before_sha256": record["before_sha256"],
+            "after_sha256": record["after_sha256"],
+        }
+        for record in change_records
+    ]
+    canonical_json = json.dumps(
+        digest_payload,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
+
+
+def review_evidence_errors(state: "State") -> list[str]:
+    """以确定性规则检查 Reviewer 成功所需的结构化证据。"""
+
+    change_records = state.get("change_records", [])
+    if not change_records:
+        return ["没有成功写入记录"]
+
+    test_records = state.get("test_run_records", [])
+    if not test_records:
+        return ["尚未运行自动化测试"]
+
+    latest_test = test_records[-1]
+    current_digest = compute_change_set_digest(change_records)
+    errors: list[str] = []
+    if latest_test["change_set_digest"] != current_digest:
+        errors.append("最新变更集合尚未测试，已有测试证据已失效")
+    if latest_test["exit_code"] != 0 or not latest_test["success"]:
+        errors.append(f"最新测试未通过（退出码 {latest_test['exit_code']}）")
+    if "CodeSmells" not in latest_test["suite"]:
+        errors.append("最新测试套件未包含 CodeSmells")
+    return errors
 
 
 class State(TypedDict):
@@ -48,6 +133,10 @@ class State(TypedDict):
     review_protocol_errors: NotRequired[int]
     review_status: NotRequired[Literal["running", "success", "failed"]]
     change_records: NotRequired[Annotated[list[ChangeRecord], merge_change_records]]
+    test_run_records: NotRequired[
+        Annotated[list[TestRunRecord], merge_test_run_records]
+    ]
+    review_evidence: NotRequired[ReviewEvidence | None]
     # 计划是 Architect 输出的机器可读“控制面”；自然语言消息仍是 Developer 的“数据面”。
     # 二者并存使模型可解释性和状态机确定性不必互相牺牲。
     refactor_plan: NotRequired[RefactorPlan | None]

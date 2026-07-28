@@ -1,6 +1,6 @@
 from langchain_core.messages import AIMessage, BaseMessage
 
-from .state import State, get_message_text
+from .state import State, get_message_text, review_evidence_errors
 
 MAX_DEVELOPER_RETRIES = 3
 MAX_REVIEW_PROTOCOL_ERRORS = 2
@@ -50,7 +50,7 @@ def route_reviewer(state: State):
     根据 Reviewer 单元测试运行和代码审查结果，判断：
     - 如果工具待执行，调用 reviewer_tools (如 run_unit_tests)；
     - 如果包含 【REFACTOR_FAIL】 且重试未超 3 次，回退至开发重试节点；
-    - 如果包含 【REFACTOR_SUCCESS】，进入成功终态；
+    - 只有成功标记与当前变更的自动化测试证据同时成立，才进入成功终态；
     - 如果缺少协议标记，有限次要求 Reviewer 修正，避免无限循环或静默成功。
     """
     if state.get("budget_exceeded"):
@@ -66,7 +66,12 @@ def route_reviewer(state: State):
             return "developer_retry"
         return "finalize_review_failure"
     if "【REFACTOR_SUCCESS】" in content:
-        return "finalize_review_success"
+        if not review_evidence_errors(state):
+            return "finalize_review_success"
+        protocol_errors = state.get("review_protocol_errors", 0)
+        if protocol_errors < MAX_REVIEW_PROTOCOL_ERRORS:
+            return "reviewer_protocol_retry"
+        return "finalize_review_failure"
 
     protocol_errors = state.get("review_protocol_errors", 0)
     if protocol_errors < MAX_REVIEW_PROTOCOL_ERRORS:

@@ -2,7 +2,10 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
+from langchain_core.messages import AIMessage
 from langgraph.checkpoint.base import get_checkpoint_metadata
+from langgraph.graph import END, START, StateGraph
+from langgraph.prebuilt import ToolNode
 from pydantic import ValidationError
 
 import agent.tools as agent_tools
@@ -11,8 +14,31 @@ from agent.credentials import (
     EphemeralCredentialVault,
     runtime_credentials,
 )
+from agent.state import State
 from app import RefactorRequest, authorize_refactor_request, build_graph_config
 from session_registry import runtime_sessions
+
+
+def _invoke_test_tool(test_suite: str):
+    tool_call = {
+        "name": "run_unit_tests",
+        "args": {"test_suite": test_suite},
+        "id": "security-test-call",
+        "type": "tool_call",
+    }
+    graph_builder = StateGraph(State)
+    graph_builder.add_node("tools", ToolNode([agent_tools.run_unit_tests]))
+    graph_builder.add_edge(START, "tools")
+    graph_builder.add_edge("tools", END)
+    graph = graph_builder.compile()
+    return graph.invoke(
+        {
+            "messages": [AIMessage(content="", tool_calls=[tool_call])],
+            "retry_count": 0,
+            "change_records": [],
+            "test_run_records": [],
+        }
+    )
 
 
 def test_graph_config_replaces_api_key_with_opaque_reference():
@@ -156,7 +182,7 @@ def test_unit_test_tool_uses_fixed_argv_without_shell(monkeypatch):
 
     monkeypatch.setattr(agent_tools.subprocess, "run", fake_run)
 
-    result = agent_tools.run_unit_tests.invoke({"test_suite": "backend"})
+    result = _invoke_test_tool("backend")
 
     assert captured["shell"] is False
     assert captured["command"][-1] == "backend/tests"
@@ -166,9 +192,11 @@ def test_unit_test_tool_uses_fixed_argv_without_shell(monkeypatch):
         "-p",
         "no:cacheprovider",
     ]
-    assert "tests passed" in result
+    assert "tests passed" in result["messages"][-1].content
 
 
 def test_unit_test_tool_rejects_command_injection():
     with pytest.raises(ValidationError):
-        agent_tools.run_unit_tests.invoke({"test_suite": "backend; whoami"})
+        agent_tools.run_unit_tests.get_input_schema().model_validate(
+            {"test_suite": "backend; whoami"}
+        )

@@ -61,7 +61,7 @@ py-modules = [
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "../CodeSmells/tests"]
 cache_dir = ".cache/pytest"
 addopts = ["-ra", "--strict-markers"]
 

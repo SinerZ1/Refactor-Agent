@@ -11,7 +11,8 @@ LangGraph 编排 `Architect → Developer → Reviewer` 主流程，通过浏览
 
 - Architect 读取代码、检索 AST 符号并查询 Neo4j/内存调用图，生成重构方案。
 - Developer 在 `CodeSmells/` 内读写 Python 文件；每次写入通过 HITL Diff 弹窗等待审批。
-- Reviewer 仅能运行预定义测试套件，并通过成功/失败协议决定结束或退回 Developer。
+- Reviewer 仅能运行预定义测试套件；成功终态要求当前变更摘要对应的 CodeSmells
+  测试通过，并同时满足结构化证据门禁和成功协议。
 - FastAPI 以 SSE 流式推送版本化 Agent 事件，以 WebSocket 承载 A2A 消息和审批交互。
 - Redis 可持久化 LangGraph checkpoint；不可用时自动降级为进程内 `MemorySaver`。
 - Neo4j 可保存代码调用拓扑；不可用时自动降级为内存 AST 调用图。
@@ -124,7 +125,6 @@ venv\Scripts\python.exe main_gui.py
   实际执行仍遵循单一的 `Architect → Developer → Reviewer` LangGraph 主流程。
 - 会话注册表和运行时 API Key 保存在当前进程内；服务重启后需要重新建立会话和模型配置。
 - 未配置 Redis 时，HITL checkpoint 只在当前进程内有效；未配置 Neo4j 时只提供 AST 降级图。
-- Reviewer 当前以预定义测试工具和模型输出协议为主要依据，尚未实现结构化证据硬门禁。
 - Agent 消息 Markdown 尚未完成系统性净化，当前版本应仅用于可信本地开发环境。
 - 当前仓库尚未配置完整 CI，阶段 0 的本地验证基线（2026-07-28）为：
   后端 `67 passed`，前端 `17 passed`，前端类型检查和生产构建均通过。

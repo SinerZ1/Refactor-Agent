@@ -8,9 +8,10 @@ from typing import Annotated, Literal
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import InjectedToolCallId, tool
 from langgraph.errors import GraphInterrupt
+from langgraph.prebuilt import InjectedState
 from langgraph.types import Command, interrupt
 
-from .state import ChangeRecord
+from .state import ChangeRecord, State, TestRunRecord, compute_change_set_digest
 
 # ============================================================
 # 教学说明: 智能体工具库 (Agent Tooling)
@@ -25,6 +26,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 REFACTOR_ROOT = (PROJECT_ROOT / "CodeSmells").resolve()
 MAX_CODE_FILE_BYTES = 1_000_000
 MAX_REVIEW_DIFF_CHARS = 12_000
+MAX_TEST_OUTPUT_CHARS = 8_000
 
 
 def get_project_root() -> str:
@@ -244,13 +246,76 @@ def build_change_record(
     }
 
 
-@tool(response_format="content_and_artifact")
+@tool
 def run_unit_tests(
+    state: Annotated[State, InjectedState],
+    tool_call_id: Annotated[str, InjectedToolCallId],
     test_suite: Literal["backend", "codesmells", "all"] = "all",
-) -> tuple[str, dict]:
+) -> Command:
     """
     运行预定义测试套件。只能选择 backend、codesmells 或 all，不能传入 shell 命令。
     """
+    suite_labels = {
+        "backend": "backend/tests",
+        "codesmells": "CodeSmells",
+        "all": "backend/tests + CodeSmells",
+    }
+    change_set_digest = compute_change_set_digest(state.get("change_records", []))
+
+    def bounded_output(output: str) -> str:
+        """限制 ToolMessage 与 Checkpoint 日志体积，避免测试噪声放大状态存储。"""
+
+        if len(output) <= MAX_TEST_OUTPUT_CHARS:
+            return output
+        truncation_marker = "\n... [测试输出已截断]"
+        return (
+            output[: MAX_TEST_OUTPUT_CHARS - len(truncation_marker)] + truncation_marker
+        )
+
+    def tool_result(
+        *,
+        output: str,
+        success: bool,
+        exit_code: int,
+        failure_kind: str | None = None,
+    ) -> Command:
+        output_excerpt = bounded_output(output)
+        record: TestRunRecord = {
+            "suite": suite_labels[test_suite],
+            "success": success,
+            "exit_code": exit_code,
+            "change_set_digest": change_set_digest,
+            "output_excerpt": output_excerpt,
+        }
+        artifact: dict = {
+            "success": success,
+            "test_suite": test_suite,
+            "suite": record["suite"],
+            "exit_code": exit_code,
+            "change_set_digest": change_set_digest,
+        }
+        if failure_kind is not None:
+            artifact["failure_kind"] = failure_kind
+        return Command(
+            update={
+                "messages": [
+                    ToolMessage(
+                        content=(
+                            "测试执行完成。"
+                            f"退出代码 (Exit Code): {exit_code}\n"
+                            f"变更摘要: {change_set_digest}\n"
+                            f"输出内容:\n{output_excerpt}"
+                        ),
+                        tool_call_id=tool_call_id,
+                        name="run_unit_tests",
+                        status="success" if success else "error",
+                        artifact=artifact,
+                    )
+                ],
+                "test_run_records": [record],
+            }
+        )
+
     try:
         encoding_format = "gbk" if os.name == "nt" else "utf-8"
         python_executable = PROJECT_ROOT / "backend" / "venv" / "Scripts" / "python.exe"
@@ -283,23 +348,18 @@ def run_unit_tests(
         if not output:
             output = "<无任何标准输出或错误输出 (No output)>"
         success = result.returncode == 0
-        return (
-            f"测试执行完成。退出代码 (Exit Code): {result.returncode}\n输出内容:\n{output}",
-            {
-                "success": success,
-                "test_suite": test_suite,
-                "exit_code": result.returncode,
-                **({} if success else {"failure_kind": "test_failure"}),
-            },
+        return tool_result(
+            output=output,
+            success=success,
+            exit_code=result.returncode,
+            failure_kind=None if success else "test_failure",
         )
     except Exception as e:
-        return (
-            f"运行测试失败: {e!s}",
-            {
-                "success": False,
-                "test_suite": test_suite,
-                "failure_kind": "test_execution_error",
-            },
+        return tool_result(
+            output=f"运行测试失败: {e!s}",
+            success=False,
+            exit_code=-1,
+            failure_kind="test_execution_error",
         )
 
 
