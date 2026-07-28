@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { defineAsyncComponent, ref, nextTick, watch, onMounted, onUnmounted } from 'vue'
-import { Marked } from 'marked'
 import '@vue-flow/core/dist/style.css'
 import '@vue-flow/core/dist/theme-default.css'
 import { API_BASE_URL } from './api'
@@ -9,16 +8,7 @@ import { useRunBudget } from './composables/useRunBudget'
 import { useTaskDag } from './composables/useTaskDag'
 import { parseAgentEvent } from './types/agentEvents'
 import { useTheme } from './composables/useTheme'
-
-const markedInstance = new Marked({
-  gfm: true,
-  breaks: true,
-})
-
-const renderMarkdown = (text: string) => {
-  if (!text) return ''
-  return markedInstance.parse(text) as string
-}
+import { renderSafeMarkdown } from './utils/markdown'
 
 // 两个图形面板都不属于默认代码视图。异步组件使 ECharts/Vue Flow 在用户首次
 // 打开对应标签时才下载，避免把图形引擎计入工作区首屏关键路径。
@@ -804,7 +794,7 @@ const handleSendChatMessage = () => {
                 <span v-else-if="msg.role === 'architect'">📐 ArchitectAgent (Architect)</span>
                 <span v-else>🤖 {{ msg.role }}</span>
               </div>
-              <div class="bubble-markdown" v-html="renderMarkdown(msg.text)"></div>
+              <div class="bubble-markdown" v-html="renderSafeMarkdown(msg.text)"></div>
             </div>
           </div>
 
