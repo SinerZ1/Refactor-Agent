@@ -37,6 +37,7 @@ Refactor-Agent/
 ├─ CodeSmells/             # Agent 被允许读取和重构的示例历史代码
 ├─ backend/
 │  ├─ agent/               # 状态、提示词、工具、节点、路由与工作流编排
+│  ├─ evals/               # 24 个 Agent 场景、离线基准与 JSON/Markdown 报告
 │  ├─ scripts/             # 虚拟环境中的开发命令入口
 │  ├─ tests/               # 后端测试
 │  ├─ app.py               # FastAPI、SSE、WebSocket 与静态资源入口
@@ -118,6 +119,21 @@ venv\Scripts\python.exe main_gui.py
   连接失败会回退到内存 AST 调用图。
 
 完整数据流和降级关系见 [架构说明](docs/architecture.md)。
+
+## Agent 评测
+
+在 `backend/` 目录运行一条命令即可执行不调用付费 API 的离线评测：
+
+```powershell
+venv\Scripts\python.exe -m evals.run --mode offline
+```
+
+评测覆盖长函数、重复代码、命名、高耦合、类型、异常、跨文件依赖、Prompt
+injection、越界写入、审批拒绝、测试失败和预算耗尽，输出 JSON 与 Markdown 报告，
+并统计行为测试、审查、重试、工具、Token、耗时、HITL 和安全拦截指标。报告目录
+`backend/evals/output/` 不进入版本控制；仓库只保留不含 Prompt、API 响应和凭据的稳定
+离线基准。可选真实模型模式及数据边界见
+[`backend/evals/README.md`](backend/evals/README.md)。
 
 ## 当前限制
 

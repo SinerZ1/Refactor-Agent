@@ -20,3 +20,6 @@ __pycache__/
 
 # Agent 每次 run 的隔离重构快照（成功、拒绝或失败后自动清理）
 /.refactor-workspaces/
+
+# Agent Eval 本地报告（仅提交 evals/baselines/ 中的稳定归一化基准）
+/backend/evals/output/

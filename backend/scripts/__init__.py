@@ -83,6 +83,7 @@ def check_mypy():
         [
             "mypy",
             "agent",
+            "evals",
             "app.py",
             "code_indexer.py",
             "graph_indexer.py",
