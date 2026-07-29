@@ -886,6 +886,12 @@
   animation: shaking 0.4s ease-in-out !important;
 }
 
+.dag-node-blocked {
+  background-color: #263238 !important;
+  color: #b0bec5 !important;
+  border: 2px dashed #78909c !important;
+}
+
 @keyframes breathing {
   0% {
     box-shadow: 0 0 4px #ff9800;
@@ -1608,6 +1614,13 @@ select:focus-visible {
   border-color: var(--danger) !important;
   background: var(--original-bg) !important;
   color: var(--danger) !important;
+}
+
+.dag-node-blocked {
+  border-color: var(--muted) !important;
+  border-style: dashed !important;
+  background: var(--surface-strong) !important;
+  color: var(--muted) !important;
 }
 
 @media (max-width: 1080px) {

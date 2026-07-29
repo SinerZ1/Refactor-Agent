@@ -53,6 +53,40 @@ class ReviewEvidence(TypedDict):
     test_exit_code: int
 
 
+TaskExecutionStatus = Literal[
+    "pending",
+    "running",
+    "completed",
+    "failed",
+    "blocked",
+]
+PlanExecutionStatus = Literal[
+    "pending",
+    "running",
+    "completed",
+    "failed",
+    "fallback",
+]
+
+
+class TaskFailure(TypedDict):
+    """任务调度器记录的确定性失败事实，不依赖模型自然语言供下游判断。"""
+
+    reason: str
+    failure_kind: str
+    retry_count: int
+
+
+class TaskTransition(TypedDict):
+    """单个图节点产生的任务状态迁移，供事件反腐层精确投影到前端。"""
+
+    task_id: str
+    status: TaskExecutionStatus
+    reason: NotRequired[str]
+    retry_count: NotRequired[int]
+    blocked_task_ids: NotRequired[list[str]]
+
+
 def merge_change_records(
     existing: list[ChangeRecord], updates: list[ChangeRecord]
 ) -> list[ChangeRecord]:
@@ -141,6 +175,16 @@ class State(TypedDict):
     # 二者并存使模型可解释性和状态机确定性不必互相牺牲。
     refactor_plan: NotRequired[RefactorPlan | None]
     plan_error: NotRequired[str | None]
+    # 计划是执行控制面：状态字段随 Checkpointer 持久化，HITL 恢复时继续同一活动任务。
+    task_statuses: NotRequired[dict[str, TaskExecutionStatus]]
+    active_task_id: NotRequired[str | None]
+    completed_task_ids: NotRequired[list[str]]
+    task_failures: NotRequired[dict[str, TaskFailure]]
+    task_retry_counts: NotRequired[dict[str, int]]
+    plan_status: NotRequired[PlanExecutionStatus]
+    active_task_write_succeeded: NotRequired[bool]
+    active_task_failure_reason: NotRequired[str | None]
+    task_transition: NotRequired[TaskTransition | None]
     run_usage: NotRequired[RunUsage]
     run_budget_limits: NotRequired[RunBudgetLimits]
     budget_exceeded: NotRequired[bool]

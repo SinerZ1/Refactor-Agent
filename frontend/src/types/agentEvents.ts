@@ -6,8 +6,12 @@ export type AgentEventType =
   | 'run.usage.updated'
   | 'run.budget.exceeded'
   | 'plan.created'
+  | 'plan.completed'
+  | 'plan.failed'
   | 'task.started'
   | 'task.completed'
+  | 'task.failed'
+  | 'task.blocked'
   | 'tool.started'
   | 'tool.completed'
   | 'tool.failed'
@@ -72,8 +76,12 @@ const EVENT_TYPES = new Set<AgentEventType>([
   'run.usage.updated',
   'run.budget.exceeded',
   'plan.created',
+  'plan.completed',
+  'plan.failed',
   'task.started',
   'task.completed',
+  'task.failed',
+  'task.blocked',
   'tool.started',
   'tool.completed',
   'tool.failed',

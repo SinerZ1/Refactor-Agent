@@ -6,17 +6,24 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
 
-from .edges import route_architect, route_developer, route_reviewer
+from .edges import (
+    route_architect,
+    route_developer,
+    route_reviewer,
+    route_task_scheduler,
+)
 from .nodes import (
     call_architect,
     call_developer,
     call_reviewer,
     developer_retry_node,
     finalize_budget_failure_node,
+    finalize_plan_failure_node,
     finalize_review_failure_node,
     finalize_review_success_node,
     reviewer_protocol_retry_node,
 )
+from .scheduler import complete_active_task_node, schedule_next_task_node
 
 # 使用高内聚相对导入，解耦子包结构
 from .state import State
@@ -47,9 +54,12 @@ workflow = StateGraph(State)
 workflow.add_node("architect", call_architect)
 workflow.add_node("developer", call_developer)
 workflow.add_node("reviewer", call_reviewer)
+workflow.add_node("schedule_task", schedule_next_task_node)
+workflow.add_node("complete_task", complete_active_task_node)
 workflow.add_node("developer_retry", developer_retry_node)
 workflow.add_node("reviewer_protocol_retry", reviewer_protocol_retry_node)
 workflow.add_node("finalize_budget_failure", finalize_budget_failure_node)
+workflow.add_node("finalize_plan_failure", finalize_plan_failure_node)
 workflow.add_node("finalize_review_success", finalize_review_success_node)
 workflow.add_node("finalize_review_failure", finalize_review_failure_node)
 
@@ -69,11 +79,22 @@ workflow.add_conditional_edges(
     route_architect,
     {
         "architect_tools": "architect_tools",
-        "developer": "developer",
+        "schedule_task": "schedule_task",
         "finalize_budget_failure": "finalize_budget_failure",
     },
 )
 workflow.add_edge("architect_tools", "architect")
+
+workflow.add_conditional_edges(
+    "schedule_task",
+    route_task_scheduler,
+    {
+        "developer": "developer",
+        "reviewer": "reviewer",
+        "finalize_budget_failure": "finalize_budget_failure",
+        "finalize_plan_failure": "finalize_plan_failure",
+    },
+)
 
 # Developer 条件边路由
 workflow.add_conditional_edges(
@@ -81,14 +102,16 @@ workflow.add_conditional_edges(
     route_developer,
     {
         "developer_tools": "developer_tools",
+        "complete_task": "complete_task",
         "reviewer": "reviewer",
         "finalize_budget_failure": "finalize_budget_failure",
     },
 )
 workflow.add_edge("developer_tools", "developer")
+workflow.add_edge("complete_task", "schedule_task")
 
-# Developer Retry 直连返回开发节点
-workflow.add_edge("developer_retry", "developer")
+# Reviewer 打回先重开指定任务及下游，再由同一调度器选择 ready task。
+workflow.add_edge("developer_retry", "schedule_task")
 
 # Reviewer 条件边路由
 workflow.add_conditional_edges(
@@ -106,6 +129,7 @@ workflow.add_conditional_edges(
 workflow.add_edge("reviewer_tools", "reviewer")
 workflow.add_edge("reviewer_protocol_retry", "reviewer")
 workflow.add_edge("finalize_budget_failure", END)
+workflow.add_edge("finalize_plan_failure", END)
 workflow.add_edge("finalize_review_success", END)
 workflow.add_edge("finalize_review_failure", END)
 

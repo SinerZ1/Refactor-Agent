@@ -30,7 +30,7 @@ def route_architect(state: State):
     last_message = state["messages"][-1]
     if _has_tool_calls(last_message):
         return "architect_tools"
-    return "developer"
+    return "schedule_task"
 
 
 def route_developer(state: State):
@@ -38,11 +38,39 @@ def route_developer(state: State):
     根据 Developer 的最后一条消息决定是调用写文件等工具，还是流转到 Reviewer 审查
     """
     if state.get("budget_exceeded"):
-        return "finalize_budget_failure"
+        return (
+            "complete_task"
+            if state.get("refactor_plan") is not None
+            and state.get("plan_status") != "fallback"
+            else "finalize_budget_failure"
+        )
     last_message = state["messages"][-1]
     if _has_tool_calls(last_message):
         return "developer_tools"
+    if (
+        state.get("refactor_plan") is not None
+        and state.get("plan_status") != "fallback"
+    ):
+        return "complete_task"
     return "reviewer"
+
+
+def route_task_scheduler(state: State):
+    """把计划状态映射到下一图节点，Reviewer 只能在全部任务完成后启动。"""
+
+    if state.get("plan_status") == "fallback" or state.get("refactor_plan") is None:
+        return "developer"
+    if state.get("plan_status") == "completed":
+        return "reviewer"
+    if state.get("plan_status") == "failed":
+        return (
+            "finalize_budget_failure"
+            if state.get("budget_exceeded")
+            else "finalize_plan_failure"
+        )
+    if state.get("active_task_id"):
+        return "developer"
+    return "finalize_plan_failure"
 
 
 def route_reviewer(state: State):

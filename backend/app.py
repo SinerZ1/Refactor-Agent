@@ -515,6 +515,14 @@ def refactor_code_stream(request: RefactorRequest, http_request: Request):
                                 request.thread_id, session_token, run_id
                             )
                         )
+                        active_task_id = state.values.get("active_task_id")
+                        interrupt_payload["task_statuses"] = state.values.get(
+                            "task_statuses", {}
+                        )
+                        interrupt_payload["active_task_id"] = active_task_id
+                        interrupt_payload["plan_status"] = state.values.get(
+                            "plan_status", "fallback"
+                        )
                         keep_run_open = True
                         print(
                             f"[app] Graph suspended on interrupt for `{request.thread_id}`."
@@ -525,6 +533,11 @@ def refactor_code_stream(request: RefactorRequest, http_request: Request):
                                     "approval.waiting",
                                     "等待用户确认文件写入",
                                     node="developer",
+                                    task_id=(
+                                        str(active_task_id)
+                                        if active_task_id is not None
+                                        else None
+                                    ),
                                     tool="write_code_file",
                                     payload=interrupt_payload,
                                 )

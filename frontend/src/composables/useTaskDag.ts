@@ -1,8 +1,9 @@
-import { shallowRef } from 'vue'
+import { ref, shallowRef } from 'vue'
 import type { Edge, Node } from '@vue-flow/core'
 import { isRefactorPlan, type AgentEvent, type RefactorPlan } from '../types/agentEvents'
 
-export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'failed'
+export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'failed' | 'blocked'
+type BackendTaskStatus = 'pending' | 'running' | 'completed' | 'failed' | 'blocked'
 const CLOSED_ARROW_MARKER = 'arrowclosed'
 const TASK_ID_PATTERN = /^[a-z][a-z0-9_-]{0,63}$/
 
@@ -90,6 +91,7 @@ export function useTaskDag() {
   // 每个工作区实例复制初始值，避免 Vue Flow 对模块级模板对象的可变更新跨实例泄漏。
   const dagNodes = shallowRef<Node[]>(structuredClone(initialNodes))
   const dagEdges = shallowRef<Edge[]>(structuredClone(initialEdges))
+  const isDynamicDag = ref(false)
 
   /**
    * 计划布局采用拓扑层级而非任务数组顺序：根任务位于 Architect 右侧，每个任务的
@@ -206,6 +208,7 @@ export function useTaskDag() {
 
     dagNodes.value = planNodes
     dagEdges.value = planEdges
+    isDynamicDag.value = true
     return true
   }
 
@@ -232,6 +235,14 @@ export function useTaskDag() {
           ...edge,
           animated: false,
           style: { stroke: '#f44336', strokeWidth: '2px' },
+          markerEnd: CLOSED_ARROW_MARKER,
+        }
+      }
+      if (status === 'blocked') {
+        return {
+          ...edge,
+          animated: false,
+          style: { stroke: '#9e9e9e', strokeWidth: '2px', strokeDasharray: '6 4' },
           markerEnd: CLOSED_ARROW_MARKER,
         }
       }
@@ -269,6 +280,28 @@ export function useTaskDag() {
     return basenameMatches.length === 1 ? basenameMatches[0]?.id : undefined
   }
 
+  const applyBackendTaskSnapshot = (event: AgentEvent): boolean => {
+    const rawStatuses = event.payload?.task_statuses
+    if (typeof rawStatuses !== 'object' || rawStatuses === null || Array.isArray(rawStatuses)) {
+      return false
+    }
+    const allowed = new Set<BackendTaskStatus>([
+      'pending',
+      'running',
+      'completed',
+      'failed',
+      'blocked',
+    ])
+    for (const [taskId, rawStatus] of Object.entries(rawStatuses)) {
+      if (typeof rawStatus !== 'string' || !allowed.has(rawStatus as BackendTaskStatus)) continue
+      updateDagNodeStatus(
+        taskId,
+        rawStatus === 'running' ? 'in_progress' : (rawStatus as TaskStatus),
+      )
+    }
+    return true
+  }
+
   /**
    * 事件归约器是 DAG 的唯一写入口。它消费后端明确声明的事件语义，
    * 不再从中文日志、文件名片段或 Reviewer 自然语言中猜测状态。
@@ -280,32 +313,53 @@ export function useTaskDag() {
     switch (event.type) {
       case 'plan.created': {
         const plan = event.payload?.plan
-        if (isRefactorPlan(plan)) initializeDagFromPlan(plan)
+        if (isRefactorPlan(plan)) {
+          initializeDagFromPlan(plan)
+          applyBackendTaskSnapshot(event)
+        }
         break
       }
       case 'task.started':
-        if (explicitTaskId) updateDagNodeStatus(explicitTaskId, 'in_progress')
+        if (!applyBackendTaskSnapshot(event) && explicitTaskId) {
+          updateDagNodeStatus(explicitTaskId, 'in_progress')
+        }
         break
       case 'task.completed':
-        if (explicitTaskId) updateDagNodeStatus(explicitTaskId, 'completed')
+        if (!applyBackendTaskSnapshot(event) && explicitTaskId) {
+          updateDagNodeStatus(explicitTaskId, 'completed')
+        }
+        break
+      case 'task.failed':
+        if (!applyBackendTaskSnapshot(event) && explicitTaskId) {
+          updateDagNodeStatus(explicitTaskId, 'failed')
+        }
+        break
+      case 'task.blocked':
+        if (!applyBackendTaskSnapshot(event) && explicitTaskId) {
+          updateDagNodeStatus(explicitTaskId, 'blocked')
+        }
+        break
+      case 'plan.completed':
+      case 'plan.failed':
+        applyBackendTaskSnapshot(event)
         break
       case 'tool.started':
-        if (event.tool === 'write_code_file' && fileTaskId) {
+        if (!isDynamicDag.value && event.tool === 'write_code_file' && fileTaskId) {
           updateDagNodeStatus(fileTaskId, 'in_progress')
-        } else if (event.tool === 'run_unit_tests') {
+        } else if (!isDynamicDag.value && event.tool === 'run_unit_tests') {
           updateDagNodeStatus('reviewer_task', 'in_progress')
         }
         break
       case 'tool.completed':
-        if (event.tool === 'write_code_file' && fileTaskId) {
+        if (!isDynamicDag.value && event.tool === 'write_code_file' && fileTaskId) {
           updateDagNodeStatus(fileTaskId, 'completed')
         }
         break
       case 'tool.failed':
       case 'approval.rejected':
-        if (event.tool === 'write_code_file' && fileTaskId) {
+        if (!isDynamicDag.value && event.tool === 'write_code_file' && fileTaskId) {
           updateDagNodeStatus(fileTaskId, 'failed')
-        } else if (event.tool === 'run_unit_tests') {
+        } else if (!isDynamicDag.value && event.tool === 'run_unit_tests') {
           updateDagNodeStatus('reviewer_task', 'failed')
         }
         break
@@ -321,7 +375,9 @@ export function useTaskDag() {
         updateDagNodeStatus('reviewer_task', 'in_progress')
         break
       case 'run.budget.exceeded':
-        updateDagNodeStatus(explicitTaskId ?? 'reviewer_task', 'failed')
+        if (!isDynamicDag.value || explicitTaskId === 'reviewer_task') {
+          updateDagNodeStatus(explicitTaskId ?? 'reviewer_task', 'failed')
+        }
         break
     }
   }
@@ -330,6 +386,7 @@ export function useTaskDag() {
     // 新会话必须丢弃上一轮动态计划，避免旧 DAG 在 Architect 生成新计划前短暂误导用户。
     dagNodes.value = structuredClone(initialNodes)
     dagEdges.value = structuredClone(initialEdges)
+    isDynamicDag.value = false
     updateDagNodeStatus('architect_task', 'in_progress')
   }
 

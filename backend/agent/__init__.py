@@ -34,6 +34,15 @@ def simple_refactor(code: str, config: RunnableConfig | None = None) -> str:
         "review_evidence": None,
         "refactor_plan": None,
         "plan_error": None,
+        "task_statuses": {},
+        "active_task_id": None,
+        "completed_task_ids": [],
+        "task_failures": {},
+        "task_retry_counts": {},
+        "plan_status": "pending",
+        "active_task_write_succeeded": False,
+        "active_task_failure_reason": None,
+        "task_transition": None,
         "run_usage": empty_run_usage(),
         "budget_exceeded": False,
         "budget_reason": None,
@@ -73,6 +82,10 @@ def stream_refactor(
     )
     current_state = app_graph.get_state(run_config)
     active_plan: RefactorPlan | None = current_state.values.get("refactor_plan")
+    active_task_id: str | None = current_state.values.get("active_task_id")
+    task_statuses: dict[str, str] = dict(current_state.values.get("task_statuses", {}))
+    plan_status: str = str(current_state.values.get("plan_status", "pending"))
+    last_emitted_plan_status: str | None = None
 
     # 阶段 2：检测是否处于挂起（Interrupt）状态，并根据是否有 resume_value 执行恢复运行
     stream_input: State | Command[Any]
@@ -102,6 +115,15 @@ def stream_refactor(
                 review_evidence=None,
                 refactor_plan=None,
                 plan_error=None,
+                task_statuses={},
+                active_task_id=None,
+                completed_task_ids=[],
+                task_failures={},
+                task_retry_counts={},
+                plan_status="pending",
+                active_task_write_succeeded=False,
+                active_task_failure_reason=None,
+                task_transition=None,
                 run_usage=empty_run_usage(),
                 budget_exceeded=False,
                 budget_reason=None,
@@ -117,6 +139,15 @@ def stream_refactor(
                 review_evidence=None,
                 refactor_plan=None,
                 plan_error=None,
+                task_statuses={},
+                active_task_id=None,
+                completed_task_ids=[],
+                task_failures={},
+                task_retry_counts={},
+                plan_status="pending",
+                active_task_write_succeeded=False,
+                active_task_failure_reason=None,
+                task_transition=None,
                 run_usage=empty_run_usage(),
                 budget_exceeded=False,
                 budget_reason=None,
@@ -130,6 +161,17 @@ def stream_refactor(
             stream_mode="updates",
         ):
             for node_name, node_output in chunk.items():
+                if "task_statuses" in node_output:
+                    task_statuses = dict(node_output["task_statuses"])
+                if "active_task_id" in node_output:
+                    active_task_id = node_output.get("active_task_id")
+                if "plan_status" in node_output:
+                    plan_status = str(node_output["plan_status"])
+                control_payload = {
+                    "task_statuses": task_statuses,
+                    "active_task_id": active_task_id,
+                    "plan_status": plan_status,
+                }
                 if node_name in [
                     "architect_tools",
                     "developer_tools",
@@ -151,6 +193,10 @@ def stream_refactor(
                         payload = dict(artifact)
                         event_task_id = find_plan_task_id(
                             active_plan, artifact.get("file_path")
+                        ) or (
+                            str(artifact["task_id"])
+                            if artifact.get("task_id") is not None
+                            else active_task_id
                         )
                         if artifact.get("failure_kind") == "approval_rejected":
                             yield make_agent_event(
@@ -173,18 +219,97 @@ def stream_refactor(
                             success=success,
                             payload=payload,
                         )
+                elif node_name == "schedule_task":
+                    transition = node_output.get("task_transition")
+                    if (
+                        isinstance(transition, dict)
+                        and transition.get("status") == "running"
+                    ):
+                        yield make_agent_event(
+                            "task.started",
+                            f"任务 `{transition['task_id']}` 开始执行",
+                            node="developer",
+                            task_id=str(transition["task_id"]),
+                            payload={
+                                **control_payload,
+                                "retry_count": transition.get("retry_count", 0),
+                            },
+                        )
+                elif node_name == "complete_task":
+                    transition = node_output.get("task_transition")
+                    if isinstance(transition, dict):
+                        transition_task_id = str(transition["task_id"])
+                        transition_status = transition.get("status")
+                        if transition_status == "completed":
+                            yield make_agent_event(
+                                "task.completed",
+                                f"任务 `{transition_task_id}` 已完成指定文件写入",
+                                level="success",
+                                node="developer",
+                                task_id=transition_task_id,
+                                success=True,
+                                payload=control_payload,
+                            )
+                        elif transition_status == "failed":
+                            yield make_agent_event(
+                                "task.failed",
+                                str(transition.get("reason") or "任务执行失败"),
+                                level="error",
+                                node="developer",
+                                task_id=transition_task_id,
+                                success=False,
+                                payload={
+                                    **control_payload,
+                                    "retry_count": transition.get("retry_count", 0),
+                                },
+                            )
+                            for blocked_id in transition.get("blocked_task_ids", []):
+                                yield make_agent_event(
+                                    "task.blocked",
+                                    f"任务 `{blocked_id}` 因上游失败被阻断",
+                                    level="error",
+                                    node="workflow",
+                                    task_id=str(blocked_id),
+                                    success=False,
+                                    payload=control_payload,
+                                )
+                        if node_output.get("plan_status") == "completed":
+                            yield make_agent_event(
+                                "plan.completed",
+                                "动态重构计划的全部任务已完成",
+                                level="success",
+                                node="workflow",
+                                success=True,
+                                payload=control_payload,
+                            )
+                            last_emitted_plan_status = "completed"
+                        elif node_output.get("plan_status") == "failed":
+                            yield make_agent_event(
+                                "plan.failed",
+                                "动态重构计划已停止",
+                                level="error",
+                                node="workflow",
+                                success=False,
+                                payload=control_payload,
+                            )
+                            last_emitted_plan_status = "failed"
                 elif node_name in ["architect", "developer", "reviewer"]:
                     task_id = (
                         "architect_task"
                         if node_name == "architect"
-                        else "reviewer_task" if node_name == "reviewer" else None
+                        else (
+                            "reviewer_task"
+                            if node_name == "reviewer"
+                            else active_task_id
+                        )
                     )
-                    yield make_agent_event(
-                        "task.started",
-                        f"{node_name.capitalize()} 开始处理任务",
-                        node=node_name,
-                        task_id=task_id,
-                    )
+                    if node_name != "developer":
+                        yield make_agent_event(
+                            "task.started",
+                            f"{node_name.capitalize()} 开始处理任务",
+                            node=node_name,
+                            task_id=task_id,
+                        )
                     usage = node_output.get("run_usage")
                     limits = node_output.get("run_budget_limits")
                     if isinstance(usage, dict) and isinstance(limits, dict):
@@ -238,7 +363,10 @@ def stream_refactor(
                                 node=node_name,
                                 task_id="architect_task",
                                 success=True,
-                                payload={"plan": active_plan},
+                                payload={
+                                    "plan": active_plan,
+                                    **control_payload,
+                                },
                             )
                         elif node_output.get("plan_error"):
                             yield make_agent_event(
@@ -328,6 +456,23 @@ def stream_refactor(
                                     success=True,
                                 )
                 elif node_name == "developer_retry":
+                    transition = node_output.get("task_transition")
+                    if isinstance(transition, dict):
+                        yield make_agent_event(
+                            "task.failed",
+                            str(transition.get("reason") or "Reviewer 打回任务"),
+                            level="error",
+                            node="reviewer",
+                            task_id=str(transition["task_id"]),
+                            success=False,
+                            payload={
+                                **control_payload,
+                                "reopened_task_ids": [
+                                    transition["task_id"],
+                                    *transition.get("blocked_task_ids", []),
+                                ],
+                            },
+                        )
                     yield make_agent_event(
                         "run.retrying",
                         "检测到审查未通过，已启动开发者重试节点",
@@ -365,6 +510,16 @@ def stream_refactor(
                                 success=False,
                             )
                 elif node_name == "finalize_review_failure":
+                    if active_plan is not None and last_emitted_plan_status != "failed":
+                        yield make_agent_event(
+                            "plan.failed",
+                            "动态重构计划未通过最终审查",
+                            level="error",
+                            node="workflow",
+                            success=False,
+                            payload=control_payload,
+                        )
+                        last_emitted_plan_status = "failed"
                     for msg in node_output.get("messages", []):
                         yield make_agent_event(
                             "agent.message.delta",
@@ -372,6 +527,33 @@ def stream_refactor(
                             node="reviewer",
                         )
                 elif node_name == "finalize_budget_failure":
+                    if active_plan is not None and last_emitted_plan_status != "failed":
+                        yield make_agent_event(
+                            "plan.failed",
+                            "动态重构计划因运行预算耗尽而终止",
+                            level="error",
+                            node="workflow",
+                            success=False,
+                            payload=control_payload,
+                        )
+                        last_emitted_plan_status = "failed"
+                    for msg in node_output.get("messages", []):
+                        yield make_agent_event(
+                            "agent.message.delta",
+                            f"\n{get_message_text(msg.content)}\n",
+                            node="workflow",
+                        )
+                elif node_name == "finalize_plan_failure":
+                    if last_emitted_plan_status != "failed":
+                        yield make_agent_event(
+                            "plan.failed",
+                            "动态重构计划无法继续执行",
+                            level="error",
+                            node="workflow",
+                            success=False,
+                            payload=control_payload,
+                        )
+                        last_emitted_plan_status = "failed"
                     for msg in node_output.get("messages", []):
                         yield make_agent_event(
                             "agent.message.delta",

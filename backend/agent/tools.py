@@ -82,6 +82,7 @@ def read_code_file(file_path: str) -> tuple[str, dict]:
 def write_code_file(
     file_path: str,
     content: str,
+    state: Annotated[State, InjectedState],
     tool_call_id: Annotated[str, InjectedToolCallId],
 ) -> Command:
     """
@@ -99,6 +100,9 @@ def write_code_file(
             "success": success,
             "file_path": file_path,
         }
+        active_task_id = state.get("active_task_id")
+        if active_task_id is not None:
+            artifact["task_id"] = active_task_id
         if failure_kind is not None:
             artifact["failure_kind"] = failure_kind
         update: dict = {
@@ -114,6 +118,9 @@ def write_code_file(
         }
         if change_record is not None:
             update["change_records"] = [change_record]
+        if active_task_id is not None:
+            update["active_task_write_succeeded"] = success
+            update["active_task_failure_reason"] = None if success else message
         return Command(update=update)
 
     try:
@@ -124,6 +131,29 @@ def write_code_file(
                 failure_kind="size_limit",
             )
         abs_path = resolve_path(file_path)
+        plan = state.get("refactor_plan")
+        active_task_id = state.get("active_task_id")
+        if plan is not None:
+            active_task = next(
+                (task for task in plan["tasks"] if task["id"] == active_task_id),
+                None,
+            )
+            if active_task is None:
+                return tool_result(
+                    "写入文件失败: 动态计划不存在有效的当前活动任务",
+                    success=False,
+                    failure_kind="missing_active_task",
+                )
+            allowed_path = Path(resolve_path(active_task["file_path"])).resolve()
+            if Path(abs_path).resolve() != allowed_path:
+                return tool_result(
+                    (
+                        "写入文件失败: 当前任务 "
+                        f"`{active_task_id}` 只允许写入 `{active_task['file_path']}`"
+                    ),
+                    success=False,
+                    failure_kind="task_path_violation",
+                )
         # 获取原文件代码（如果存在），供前端展示 Diff 对比
         original_code = ""
         if os.path.exists(abs_path):

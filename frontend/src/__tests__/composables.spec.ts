@@ -118,11 +118,18 @@ describe('workspace composables', () => {
 
     applyDagEvent({
       version: 1,
-      type: 'tool.started',
+      type: 'task.started',
       level: 'info',
-      message: '执行写入',
-      tool: 'write_code_file',
+      message: '后端调度入口任务',
       task_id: 'entrypoint',
+      payload: {
+        task_statuses: {
+          domain_models: 'completed',
+          entrypoint: 'running',
+        },
+        active_task_id: 'entrypoint',
+        plan_status: 'running',
+      },
     })
     expect(dagNodes.value.find((node) => node.id === 'entrypoint')?.data.status).toBe('in_progress')
 
@@ -190,6 +197,69 @@ describe('workspace composables', () => {
     expect(event).not.toBeNull()
     applyDagEvent(event!)
     expect(dagNodes.value.find((node) => node.id === 'architect_task')?.data.status).toBe('failed')
+  })
+
+  it('keeps dynamic DAG status aligned with authoritative task and plan events', () => {
+    const { applyDagEvent, dagNodes } = useTaskDag()
+    const plan: RefactorPlan = {
+      version: 1,
+      summary: '状态一致性',
+      tasks: [
+        {
+          id: 'models',
+          title: '模型',
+          description: '整理模型',
+          file_path: 'CodeSmells/models.py',
+          dependencies: [],
+        },
+        {
+          id: 'entrypoint',
+          title: '入口',
+          description: '调整入口',
+          file_path: 'CodeSmells/main.py',
+          dependencies: ['models'],
+        },
+      ],
+    }
+    applyDagEvent({
+      version: 1,
+      type: 'plan.created',
+      level: 'success',
+      message: '计划创建',
+      payload: {
+        plan,
+        task_statuses: { models: 'pending', entrypoint: 'pending' },
+        active_task_id: null,
+        plan_status: 'pending',
+      },
+    })
+    applyDagEvent({
+      version: 1,
+      type: 'task.failed',
+      level: 'error',
+      message: '模型任务失败',
+      task_id: 'models',
+      payload: {
+        task_statuses: { models: 'failed', entrypoint: 'blocked' },
+        active_task_id: null,
+        plan_status: 'failed',
+      },
+    })
+
+    expect(dagNodes.value.find((node) => node.id === 'models')?.data.status).toBe('failed')
+    expect(dagNodes.value.find((node) => node.id === 'entrypoint')?.data.status).toBe('blocked')
+
+    // 工具事件只描述 I/O 尝试，不能覆盖动态调度器的任务终态。
+    applyDagEvent({
+      version: 1,
+      type: 'tool.completed',
+      level: 'success',
+      message: '迟到的工具事件',
+      task_id: 'models',
+      tool: 'write_code_file',
+      payload: { file_path: 'CodeSmells/models.py' },
+    })
+    expect(dagNodes.value.find((node) => node.id === 'models')?.data.status).toBe('failed')
   })
 
   it('projects backend budget usage without estimating tokens in the browser', () => {

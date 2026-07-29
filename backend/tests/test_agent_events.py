@@ -237,3 +237,90 @@ def test_stream_emits_review_pass_only_after_evidence_terminal(monkeypatch):
 
     assert len(passed_events) == 1
     assert passed_events[0]["payload"]["evidence"] == evidence
+
+
+def test_dynamic_task_events_carry_the_authoritative_graph_state(monkeypatch):
+    plan = {
+        "version": 1,
+        "summary": "先模型后入口",
+        "tasks": [
+            {
+                "id": "models",
+                "title": "模型",
+                "description": "整理模型",
+                "file_path": "CodeSmells/models.py",
+                "dependencies": [],
+            },
+            {
+                "id": "entrypoint",
+                "title": "入口",
+                "description": "调整入口",
+                "file_path": "CodeSmells/main.py",
+                "dependencies": ["models"],
+            },
+        ],
+    }
+
+    class FakeGraph:
+        def get_state(self, _config):
+            return SimpleNamespace(values={}, interrupts=())
+
+        def stream(self, *_args, **_kwargs):
+            yield {
+                "architect": {
+                    "messages": [AIMessage(content="计划")],
+                    "refactor_plan": plan,
+                    "plan_error": None,
+                    "task_statuses": {"models": "pending", "entrypoint": "pending"},
+                    "active_task_id": None,
+                    "plan_status": "pending",
+                }
+            }
+            yield {
+                "schedule_task": {
+                    "task_statuses": {"models": "running", "entrypoint": "pending"},
+                    "active_task_id": "models",
+                    "plan_status": "running",
+                    "task_transition": {
+                        "task_id": "models",
+                        "status": "running",
+                        "retry_count": 0,
+                    },
+                }
+            }
+            yield {
+                "complete_task": {
+                    "task_statuses": {
+                        "models": "failed",
+                        "entrypoint": "blocked",
+                    },
+                    "active_task_id": None,
+                    "plan_status": "failed",
+                    "task_transition": {
+                        "task_id": "models",
+                        "status": "failed",
+                        "reason": "重试耗尽",
+                        "retry_count": 3,
+                        "blocked_task_ids": ["entrypoint"],
+                    },
+                }
+            }
+
+    monkeypatch.setattr(agent, "app_graph", FakeGraph())
+
+    events = list(agent.stream_refactor("CodeSmells/main.py", "state-event-test"))
+    started = next(
+        event
+        for event in events
+        if event["type"] == "task.started" and event["task_id"] == "models"
+    )
+    failed = next(event for event in events if event["type"] == "task.failed")
+    blocked = next(event for event in events if event["type"] == "task.blocked")
+    plan_failed = next(event for event in events if event["type"] == "plan.failed")
+
+    assert started["task_id"] == "models"
+    assert started["payload"]["task_statuses"]["models"] == "running"
+    assert failed["payload"]["task_statuses"]["models"] == "failed"
+    assert blocked["task_id"] == "entrypoint"
+    assert blocked["payload"]["task_statuses"]["entrypoint"] == "blocked"
+    assert plan_failed["payload"]["plan_status"] == "failed"
