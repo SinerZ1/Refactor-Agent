@@ -143,6 +143,11 @@ test('renders a dynamic DAG and authoritative budget from the SSE event chain', 
       success: true,
       payload: { file_path: 'CodeSmells/models.py' },
     }),
+    event('task.completed', '任务完成：整理领域模型', {
+      level: 'success',
+      task_id: 'domain_models',
+      payload: { retry_count: 0 },
+    }),
     event('run.completed', '重构完成', { level: 'success', success: true }),
   ]
   await page.route('**/api/refactor/stream', async (route) => {
