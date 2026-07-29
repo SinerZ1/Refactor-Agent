@@ -18,6 +18,10 @@ export interface ApprovalPayload {
   file_path: string
   original_code: string
   refactored_code: string
+  type?: 'write_approval' | 'aggregate_diff_approval'
+  aggregate_diff?: string
+  changed_files?: string[]
+  workspace_id?: string
 }
 
 export type BackendMessage = Record<string, unknown> & {

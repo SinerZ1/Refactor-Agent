@@ -17,15 +17,28 @@ defineEmits<{
     <div class="modal-container">
       <div class="modal-header">
         <h3>
-          <span class="panel-icon" aria-hidden="true">◇</span> 人机协作审批 (HITL) —— 代码修改确认
+          <span class="panel-icon" aria-hidden="true">◇</span> 人机协作审批 (HITL) ——
+          {{ payload.type === 'aggregate_diff_approval' ? '最终聚合变更确认' : '代码修改确认' }}
         </h3>
         <span class="file-badge">{{ payload.file_path }}</span>
       </div>
       <div class="modal-body">
         <p class="modal-tip">
-          Developer Agent 申请写入文件。为了系统的安全和质量，请审查以下原代码与重构代码的对比。
+          {{
+            payload.type === 'aggregate_diff_approval'
+              ? `Reviewer 已通过隔离工作区中的实现与测试。请审查 ${payload.changed_files?.length ?? 0} 个文件的完整聚合 diff；批准后才会原子写入真实源码。`
+              : 'Developer Agent 申请写入文件。为了系统的安全和质量，请审查以下原代码与重构代码的对比。'
+          }}
         </p>
-        <div class="diff-container">
+        <div v-if="payload.type === 'aggregate_diff_approval'" class="diff-container">
+          <div class="diff-panel modified">
+            <div class="diff-panel-title">聚合 Diff (Unified Diff)</div>
+            <pre
+              class="diff-pre"
+            ><code>{{ payload.aggregate_diff || payload.refactored_code }}</code></pre>
+          </div>
+        </div>
+        <div v-else class="diff-container">
           <div class="diff-panel original">
             <div class="diff-panel-title">原代码 (Original)</div>
             <pre

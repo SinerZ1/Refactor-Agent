@@ -1,11 +1,10 @@
 from langchain_core.messages import AIMessage
-from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
-from langgraph.types import Command
 
 import agent.nodes as agent_nodes
 import agent.tools as agent_tools
+import agent.workspace as agent_workspace
 from agent.edges import route_task_scheduler
 from agent.scheduler import (
     complete_active_task_node,
@@ -161,6 +160,12 @@ def test_write_tool_rejects_paths_outside_current_task(tmp_path, monkeypatch):
     code_root.mkdir()
     monkeypatch.setattr(agent_tools, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(agent_tools, "REFACTOR_ROOT", code_root)
+    monkeypatch.setattr(agent_workspace, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(agent_workspace, "REFACTOR_ROOT", code_root)
+    monkeypatch.setattr(
+        agent_workspace, "WORKSPACE_ROOT", tmp_path / ".refactor-workspaces"
+    )
+    workspace_state = agent_workspace.create_run_workspace()
     plan = _plan(
         _task("models", "CodeSmells/models.py"),
         _task("other", "CodeSmells/other.py"),
@@ -187,6 +192,7 @@ def test_write_tool_rejects_paths_outside_current_task(tmp_path, monkeypatch):
             "refactor_plan": plan,
             "active_task_id": "models",
             "active_task_write_succeeded": False,
+            **workspace_state,
         }
     )
 
@@ -197,15 +203,21 @@ def test_write_tool_rejects_paths_outside_current_task(tmp_path, monkeypatch):
     assert not (code_root / "other.py").exists()
 
 
-def test_hitl_resume_keeps_the_same_active_task(tmp_path, monkeypatch):
+def test_isolated_write_keeps_active_task_without_touching_real_file(
+    tmp_path, monkeypatch
+):
     code_root = tmp_path / "CodeSmells"
     code_root.mkdir()
     target = code_root / "models.py"
     target.write_text("old = True\n", encoding="utf-8")
     monkeypatch.setattr(agent_tools, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(agent_tools, "REFACTOR_ROOT", code_root)
-    monkeypatch.setattr("code_indexer.index_file", lambda _path: 1)
-    monkeypatch.setattr("graph_indexer.index_to_neo4j", lambda: False)
+    monkeypatch.setattr(agent_workspace, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(agent_workspace, "REFACTOR_ROOT", code_root)
+    monkeypatch.setattr(
+        agent_workspace, "WORKSPACE_ROOT", tmp_path / ".refactor-workspaces"
+    )
+    workspace_state = agent_workspace.create_run_workspace()
     plan = _plan(_task("models", "CodeSmells/models.py"))
     tool_call = {
         "name": "write_code_file",
@@ -220,30 +232,27 @@ def test_hitl_resume_keeps_the_same_active_task(tmp_path, monkeypatch):
     graph_builder.add_node("tools", ToolNode([agent_tools.write_code_file]))
     graph_builder.add_edge(START, "tools")
     graph_builder.add_edge("tools", END)
-    graph = graph_builder.compile(checkpointer=MemorySaver())
-    config = {"configurable": {"thread_id": "hitl-task"}}
-
-    graph.invoke(
+    result = graph_builder.compile().invoke(
         {
             "messages": [AIMessage(content="", tool_calls=[tool_call])],
             "retry_count": 0,
             "refactor_plan": plan,
             "active_task_id": "models",
             "active_task_write_succeeded": False,
+            **workspace_state,
         },
-        config,
     )
-    suspended = graph.get_state(config)
 
-    assert suspended.interrupts
-    assert suspended.values["active_task_id"] == "models"
-
-    resumed = graph.invoke(Command(resume={"approved": True}), config)
-
-    assert resumed["active_task_id"] == "models"
-    assert resumed["active_task_write_succeeded"] is True
-    assert resumed["messages"][-1].artifact["task_id"] == "models"
-    assert target.read_text(encoding="utf-8") == "new = True\n"
+    assert result["active_task_id"] == "models"
+    assert result["active_task_write_succeeded"] is True
+    assert result["messages"][-1].artifact["task_id"] == "models"
+    assert target.read_text(encoding="utf-8") == "old = True\n"
+    assert (
+        agent_workspace.resolve_workspace_path(
+            workspace_state["workspace_id"], "CodeSmells/models.py"
+        ).read_text(encoding="utf-8")
+        == "new = True\n"
+    )
 
 
 def test_reviewer_reopens_selected_task_and_transitive_downstream_only():

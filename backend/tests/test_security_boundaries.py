@@ -9,6 +9,7 @@ from langgraph.prebuilt import ToolNode
 from pydantic import ValidationError
 
 import agent.tools as agent_tools
+import agent.workspace as agent_workspace
 from agent.credentials import (
     CredentialReferenceError,
     EphemeralCredentialVault,
@@ -31,14 +32,19 @@ def _invoke_test_tool(test_suite: str):
     graph_builder.add_edge(START, "tools")
     graph_builder.add_edge("tools", END)
     graph = graph_builder.compile()
-    return graph.invoke(
-        {
-            "messages": [AIMessage(content="", tool_calls=[tool_call])],
-            "retry_count": 0,
-            "change_records": [],
-            "test_run_records": [],
-        }
-    )
+    workspace_state = agent_workspace.create_run_workspace()
+    try:
+        return graph.invoke(
+            {
+                "messages": [AIMessage(content="", tool_calls=[tool_call])],
+                "retry_count": 0,
+                "change_records": [],
+                "test_run_records": [],
+                **workspace_state,
+            }
+        )
+    finally:
+        agent_workspace.cleanup_run_workspace(workspace_state["workspace_id"])
 
 
 def test_graph_config_replaces_api_key_with_opaque_reference():
@@ -185,7 +191,9 @@ def test_unit_test_tool_uses_fixed_argv_without_shell(monkeypatch):
     result = _invoke_test_tool("backend")
 
     assert captured["shell"] is False
-    assert captured["command"][-1] == "backend/tests"
+    assert captured["command"][-1] == str(
+        agent_tools.PROJECT_ROOT / "backend" / "tests"
+    )
     assert captured["command"][1:5] == [
         "-m",
         "pytest",

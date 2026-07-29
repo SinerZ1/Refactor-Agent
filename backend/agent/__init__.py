@@ -11,9 +11,22 @@ from .events import AgentEvent, make_agent_event
 from .plans import RefactorPlan, find_plan_task_id
 from .state import State, get_message_text
 from .workflow import app_graph
+from .workspace import cleanup_run_workspace
 
 # 显式导出
 __all__ = ["app_graph", "simple_refactor", "stream_refactor"]
+
+
+def _cleanup_checkpoint_workspace(run_config: RunnableConfig) -> None:
+    """异常边界的最后防线；正常终态由显式图节点负责清理并记录状态。"""
+
+    try:
+        failed_state = app_graph.get_state(run_config)
+        workspace_id = failed_state.values.get("workspace_id")
+        if workspace_id:
+            cleanup_run_workspace(str(workspace_id))
+    except Exception:
+        pass
 
 
 def simple_refactor(code: str, config: RunnableConfig | None = None) -> str:
@@ -49,7 +62,11 @@ def simple_refactor(code: str, config: RunnableConfig | None = None) -> str:
     }
     # 同步兼容函数若仍被 Python 调用方使用，异常必须保持异常语义。把失败文本
     # 当作“重构结果”会让 HTTP/任务编排层误判成功，也会绕开 HITL 的状态契约。
-    final_state = app_graph.invoke(initial_state, run_config)
+    try:
+        final_state = app_graph.invoke(initial_state, run_config)
+    except Exception:
+        _cleanup_checkpoint_workspace(run_config)
+        raise
     return get_message_text(final_state["messages"][-1].content)
 
 
@@ -509,6 +526,72 @@ def stream_refactor(
                                 task_id="reviewer_task",
                                 success=False,
                             )
+                elif node_name == "prepare_workspace_approval":
+                    if node_output.get("workspace_error"):
+                        yield make_agent_event(
+                            "run.failed",
+                            str(node_output["workspace_error"]),
+                            level="error",
+                            node="workflow",
+                            success=False,
+                        )
+                    else:
+                        yield make_agent_event(
+                            "log",
+                            (
+                                "已生成最终聚合 diff，"
+                                f"包含 {len(node_output.get('workspace_changed_files', []))} 个文件"
+                            ),
+                            node="workflow",
+                            payload={
+                                "changed_files": node_output.get(
+                                    "workspace_changed_files", []
+                                ),
+                                "final_file_hashes": node_output.get(
+                                    "final_file_hashes", {}
+                                ),
+                            },
+                        )
+                elif node_name == "apply_workspace":
+                    if node_output.get("workspace_applied"):
+                        yield make_agent_event(
+                            "log",
+                            "最终聚合变更已原子应用到真实源码",
+                            level="success",
+                            node="workflow",
+                            success=True,
+                            payload={
+                                "approved": True,
+                                "applied": True,
+                                "rolled_back": False,
+                            },
+                        )
+                    elif node_output.get("workspace_error"):
+                        if not node_output.get("workspace_approved"):
+                            yield make_agent_event(
+                                "approval.rejected",
+                                str(node_output["workspace_error"]),
+                                level="error",
+                                node="workflow",
+                                tool="apply_workspace_changes",
+                                success=False,
+                            )
+                        yield make_agent_event(
+                            "run.failed",
+                            str(node_output["workspace_error"]),
+                            level="error",
+                            node="workflow",
+                            success=False,
+                            payload={
+                                "approved": node_output.get(
+                                    "workspace_approved", False
+                                ),
+                                "applied": False,
+                                "rolled_back": node_output.get(
+                                    "workspace_rolled_back", False
+                                ),
+                            },
+                        )
                 elif node_name == "finalize_review_failure":
                     if active_plan is not None and last_emitted_plan_status != "failed":
                         yield make_agent_event(
@@ -563,10 +646,11 @@ def stream_refactor(
                 elif node_name == "__interrupt__":
                     yield make_agent_event(
                         "log",
-                        "触发人机协作审查 (HITL)，请在弹窗中确认文件写入操作",
-                        node="developer",
+                        "触发最终聚合 diff 人机协作审查 (HITL)",
+                        node="workflow",
                     )
     except Exception as e:
+        _cleanup_checkpoint_workspace(run_config)
         yield make_agent_event(
             "run.failed",
             f"重构工作流运行失败: {e!s}",

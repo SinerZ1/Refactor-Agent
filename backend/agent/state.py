@@ -189,6 +189,18 @@ class State(TypedDict):
     run_budget_limits: NotRequired[RunBudgetLimits]
     budget_exceeded: NotRequired[bool]
     budget_reason: NotRequired[str | None]
+    # run 级隔离工作区是提交协议的一部分，而非进程内临时变量。把哈希、审批和
+    # 补偿结果写入 Checkpoint，才能在 HITL 恢复后继续验证同一份不可变事实。
+    workspace_id: NotRequired[str | None]
+    baseline_file_hashes: NotRequired[dict[str, str]]
+    final_file_hashes: NotRequired[dict[str, str]]
+    aggregate_diff: NotRequired[str]
+    workspace_changed_files: NotRequired[list[str]]
+    workspace_approved: NotRequired[bool]
+    workspace_applied: NotRequired[bool]
+    workspace_rolled_back: NotRequired[bool]
+    workspace_cleaned: NotRequired[bool]
+    workspace_error: NotRequired[str | None]
 
 
 def get_message_text(content: Any) -> str:

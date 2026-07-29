@@ -7,11 +7,11 @@ from typing import Annotated, Literal
 
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import InjectedToolCallId, tool
-from langgraph.errors import GraphInterrupt
 from langgraph.prebuilt import InjectedState
-from langgraph.types import Command, interrupt
+from langgraph.types import Command
 
 from .state import ChangeRecord, State, TestRunRecord, compute_change_set_digest
+from .workspace import resolve_workspace_path
 
 # ============================================================
 # 教学说明: 智能体工具库 (Agent Tooling)
@@ -54,12 +54,18 @@ def resolve_path(file_path: str) -> str:
 
 
 @tool(response_format="content_and_artifact")
-def read_code_file(file_path: str) -> tuple[str, dict]:
+def read_code_file(
+    file_path: str,
+    state: Annotated[State, InjectedState],
+) -> tuple[str, dict]:
     """
     读取指定路径下的本地代码文件内容。当需要查看某个具体文件的代码时使用。
     """
     try:
-        abs_path = resolve_path(file_path)
+        workspace_id = state.get("workspace_id")
+        if not workspace_id:
+            raise ValueError("当前运行缺少隔离工作区")
+        abs_path = str(resolve_workspace_path(workspace_id, file_path))
         if os.path.getsize(abs_path) > MAX_CODE_FILE_BYTES:
             return (
                 "读取文件失败: 文件超过 1 MB 安全上限",
@@ -130,7 +136,16 @@ def write_code_file(
                 success=False,
                 failure_kind="size_limit",
             )
-        abs_path = resolve_path(file_path)
+        workspace_id = state.get("workspace_id")
+        if not workspace_id:
+            return tool_result(
+                "写入文件失败: 当前运行缺少隔离工作区",
+                success=False,
+                failure_kind="missing_workspace",
+            )
+        # 真实路径只用于校验任务授权；实际写入始终落到 run 的 working 快照。
+        real_abs_path = resolve_path(file_path)
+        abs_path = str(resolve_workspace_path(workspace_id, file_path))
         plan = state.get("refactor_plan")
         active_task_id = state.get("active_task_id")
         if plan is not None:
@@ -145,7 +160,7 @@ def write_code_file(
                     failure_kind="missing_active_task",
                 )
             allowed_path = Path(resolve_path(active_task["file_path"])).resolve()
-            if Path(abs_path).resolve() != allowed_path:
+            if Path(real_abs_path).resolve() != allowed_path:
                 return tool_result(
                     (
                         "写入文件失败: 当前任务 "
@@ -163,64 +178,25 @@ def write_code_file(
             except Exception:
                 pass
 
-        # 暂停状态机执行，向前端返回审批数据包。
-        # 这里在底层相当于 Hello-Agents 课程中工具暂停返回人机协作决策状态。
-        # 状态机此时会在 Checkpointer 中挂起并保存现场，恢复（resume）后，它将返回用户反馈的数据包。
-        approval_res = interrupt(
-            {
-                "type": "write_approval",
-                "file_path": abs_path,
-                "original_code": original_code,
-                "refactored_code": content,
-            }
-        )
-
-        # 提取并验证前端返回的审批结果
-        approved = False
-        if isinstance(approval_res, bool):
-            approved = approval_res
-        elif isinstance(approval_res, dict):
-            approved = approval_res.get("approved", False)
-
-        if not approved:
-            return tool_result(
-                f"写入文件 `{abs_path}` 失败：用户在人机协作审批中点击拒绝，打回修改。",
-                success=False,
-                failure_kind="approval_rejected",
-            )
-
-        # 审批通过，执行本地写入
+        # Developer 的 ToolResponse 只代表“隔离副本写入成功”，不再拥有真实源码提交
+        # 权限。最终 Reviewer 通过后，聚合 diff 会在独立节点触发一次 HITL。
         dir_name = os.path.dirname(abs_path)
         if dir_name:
             os.makedirs(dir_name, exist_ok=True)
         with open(abs_path, "w", encoding="utf-8") as f:
             f.write(content)
 
-        # 写文件与索引更新属于同一业务事实：若只更新磁盘，后续 Agent 会从 RAG
-        # 读取旧快照，形成“已修改但仍按旧代码推理”的时间一致性缺陷。
-        index_message = ""
-        try:
-            from code_indexer import index_file
-            from graph_indexer import index_to_neo4j
-
-            symbol_count = index_file(abs_path)
-            neo4j_updated = index_to_neo4j()
-            index_message = (
-                f"；AST 索引已刷新 {symbol_count} 个符号，"
-                f"Neo4j {'已同步' if neo4j_updated else '不可用，已保留 AST 降级模式'}"
-            )
-        except Exception as index_error:
-            index_message = f"；索引刷新失败，请重新构建索引: {index_error}"
-        change_record = build_change_record(abs_path, original_code, content)
+        change_record = build_change_record(
+            abs_path,
+            original_code,
+            content,
+            relative_path_override=file_path,
+        )
         return tool_result(
-            f"成功将重构代码写入到文件: {abs_path}{index_message}",
+            f"成功将重构代码写入隔离工作区: {file_path}",
             success=True,
             change_record=change_record,
         )
-    except GraphInterrupt:
-        # 重要：必须重新抛出 GraphInterrupt，否则会被底下的 Exception 捕获
-        # 从而导致 LangGraph 的中断挂起机制失效，直接把打断异常当作普通错误返回给大模型
-        raise
     except Exception as e:
         return tool_result(
             f"写入文件失败: {e!s}",
@@ -230,7 +206,11 @@ def write_code_file(
 
 
 def build_change_record(
-    absolute_path: str, original_code: str, refactored_code: str
+    absolute_path: str,
+    original_code: str,
+    refactored_code: str,
+    *,
+    relative_path_override: str | None = None,
 ) -> ChangeRecord:
     """构造 Reviewer 所需的结构化差异，不赋予其任意文件读取能力。
 
@@ -239,7 +219,11 @@ def build_change_record(
     截断会被显式标记，Reviewer 仍可据此要求 Developer 拆分修改。
     """
 
-    relative_path = Path(absolute_path).resolve().relative_to(PROJECT_ROOT).as_posix()
+    relative_path = (
+        Path(relative_path_override).as_posix()
+        if relative_path_override is not None
+        else Path(absolute_path).resolve().relative_to(PROJECT_ROOT).as_posix()
+    )
     before_lines = original_code.splitlines()
     after_lines = refactored_code.splitlines()
     diff_lines = list(
@@ -349,10 +333,17 @@ def run_unit_tests(
     try:
         encoding_format = "gbk" if os.name == "nt" else "utf-8"
         python_executable = PROJECT_ROOT / "backend" / "venv" / "Scripts" / "python.exe"
+        workspace_id = state.get("workspace_id")
+        if not workspace_id:
+            raise ValueError("当前运行缺少隔离工作区")
+        workspace_root = resolve_workspace_path(workspace_id, "CodeSmells").parent
         test_targets = {
-            "backend": ["backend/tests"],
-            "codesmells": ["CodeSmells"],
-            "all": ["backend/tests", "CodeSmells"],
+            "backend": [str(PROJECT_ROOT / "backend" / "tests")],
+            "codesmells": [str(workspace_root / "CodeSmells")],
+            "all": [
+                str(PROJECT_ROOT / "backend" / "tests"),
+                str(workspace_root / "CodeSmells"),
+            ],
         }
         command = [
             str(python_executable),
@@ -362,6 +353,19 @@ def run_unit_tests(
             "no:cacheprovider",
             *test_targets[test_suite],
         ]
+        test_environment = os.environ.copy()
+        # Reviewer 测试属于隔离工作区的验证过程，字节码是运行副产物而非 Agent
+        # 变更；禁止生成 pyc，避免它们进入最终哈希或聚合 diff。
+        test_environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        test_environment["PYTHONPATH"] = os.pathsep.join(
+            filter(
+                None,
+                [
+                    str(workspace_root),
+                    test_environment.get("PYTHONPATH", ""),
+                ],
+            )
+        )
         result = subprocess.run(
             command,
             shell=False,
@@ -370,7 +374,8 @@ def run_unit_tests(
             encoding=encoding_format,
             errors="replace",
             timeout=60,
-            cwd=get_project_root(),
+            cwd=str(workspace_root),
+            env=test_environment,
             check=False,
         )
         output = (result.stdout or "").strip() + "\n" + (result.stderr or "").strip()

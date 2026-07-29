@@ -226,13 +226,19 @@ describe('App', () => {
         type: 'approval_request',
         payload: {
           approval_id: 'approval-1',
-          file_path: 'CodeSmells/main.py',
-          original_code: 'old',
-          refactored_code: 'new',
+          type: 'aggregate_diff_approval',
+          file_path: '聚合变更（2 个文件）',
+          original_code: '',
+          refactored_code: '-old\n+new',
+          aggregate_diff: '-old\n+new',
+          changed_files: ['CodeSmells/main.py', 'CodeSmells/models.py'],
         },
       }),
     } as MessageEvent)
     await wrapper.vm.$nextTick()
+    expect(wrapper.text()).toContain('最终聚合变更确认')
+    expect(wrapper.text()).toContain('2 个文件的完整聚合 diff')
+    expect(wrapper.get('.diff-pre').text()).toContain('-old')
     webSocket.readyState = WebSocketStub.CLOSED
     await wrapper.get('.btn-approve').trigger('click')
     await flushPromises()

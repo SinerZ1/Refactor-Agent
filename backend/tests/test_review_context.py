@@ -4,6 +4,7 @@ from langgraph.prebuilt import ToolNode
 
 import agent.nodes as agent_nodes
 import agent.tools as agent_tools
+import agent.workspace as agent_workspace
 from agent.state import (
     MAX_CHANGE_RECORDS,
     MAX_TEST_RUN_RECORDS,
@@ -52,12 +53,17 @@ def _invoke_test_tool(state: State, test_suite: str = "codesmells"):
     graph_builder.add_edge(START, "tools")
     graph_builder.add_edge("tools", END)
     graph = graph_builder.compile()
-    return graph.invoke(
-        {
-            **state,
-            "messages": [AIMessage(content="", tool_calls=[tool_call])],
-        }
-    )
+    workspace_state = agent_workspace.create_run_workspace()
+    try:
+        return graph.invoke(
+            {
+                **state,
+                **workspace_state,
+                "messages": [AIMessage(content="", tool_calls=[tool_call])],
+            }
+        )
+    finally:
+        agent_workspace.cleanup_run_workspace(workspace_state["workspace_id"])
 
 
 def test_change_record_contains_verifiable_bounded_diff(monkeypatch, tmp_path):
@@ -69,9 +75,12 @@ def test_change_record_contains_verifiable_bounded_diff(monkeypatch, tmp_path):
 
     monkeypatch.setattr(agent_tools, "PROJECT_ROOT", project_root)
     monkeypatch.setattr(agent_tools, "REFACTOR_ROOT", code_root)
-    monkeypatch.setattr(agent_tools, "interrupt", lambda _payload: True)
-    monkeypatch.setattr("code_indexer.index_file", lambda _path: 1)
-    monkeypatch.setattr("graph_indexer.index_to_neo4j", lambda: False)
+    monkeypatch.setattr(agent_workspace, "PROJECT_ROOT", project_root)
+    monkeypatch.setattr(agent_workspace, "REFACTOR_ROOT", code_root)
+    monkeypatch.setattr(
+        agent_workspace, "WORKSPACE_ROOT", project_root / ".refactor-workspaces"
+    )
+    workspace_state = agent_workspace.create_run_workspace()
 
     tool_call = {
         "name": "write_code_file",
@@ -93,6 +102,7 @@ def test_change_record_contains_verifiable_bounded_diff(monkeypatch, tmp_path):
             "messages": [AIMessage(content="", tool_calls=[tool_call])],
             "retry_count": 0,
             "change_records": [],
+            **workspace_state,
         }
     )
 
@@ -103,13 +113,18 @@ def test_change_record_contains_verifiable_bounded_diff(monkeypatch, tmp_path):
     assert tool_message.status == "success"
     assert tool_message.artifact["success"] is True
     assert tool_message.artifact["file_path"] == "CodeSmells/example.py"
-    assert target.read_text(encoding="utf-8") == "new\nextra\n"
+    working_target = agent_workspace.resolve_workspace_path(
+        workspace_state["workspace_id"], "CodeSmells/example.py"
+    )
+    assert target.read_text(encoding="utf-8") == "old\n"
+    assert working_target.read_text(encoding="utf-8") == "new\nextra\n"
     assert change_record["file_path"] == "CodeSmells/example.py"
     assert change_record["before_sha256"] != change_record["after_sha256"]
     assert change_record["added_lines"] == 2
     assert change_record["removed_lines"] == 1
     assert "-old" in change_record["unified_diff"]
     assert "+new" in change_record["unified_diff"]
+    agent_workspace.cleanup_run_workspace(workspace_state["workspace_id"])
 
 
 def test_change_record_reducer_bounds_checkpoint_history():

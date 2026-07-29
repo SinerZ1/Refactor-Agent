@@ -6,6 +6,7 @@ from langgraph.prebuilt import ToolNode
 
 import agent
 import agent.tools as agent_tools
+import agent.workspace as agent_workspace
 from agent.events import make_agent_event
 from agent.state import State
 
@@ -22,14 +23,19 @@ def _invoke_test_tool(test_suite: str):
     graph_builder.add_edge(START, "tools")
     graph_builder.add_edge("tools", END)
     graph = graph_builder.compile()
-    return graph.invoke(
-        {
-            "messages": [AIMessage(content="", tool_calls=[tool_call])],
-            "retry_count": 0,
-            "change_records": [],
-            "test_run_records": [],
-        }
-    )
+    workspace_state = agent_workspace.create_run_workspace()
+    try:
+        return graph.invoke(
+            {
+                "messages": [AIMessage(content="", tool_calls=[tool_call])],
+                "retry_count": 0,
+                "change_records": [],
+                "test_run_records": [],
+                **workspace_state,
+            }
+        )
+    finally:
+        agent_workspace.cleanup_run_workspace(workspace_state["workspace_id"])
 
 
 def test_event_envelope_keeps_legacy_token_without_hiding_semantics():
@@ -63,22 +69,35 @@ def test_unit_test_tool_marks_nonzero_exit_as_domain_failure(monkeypatch):
     message = result["messages"][-1]
 
     assert isinstance(message, ToolMessage)
+    assert message.artifact is not None, message.content
     assert message.artifact["success"] is False
     assert message.artifact["exit_code"] == 1
     assert result["test_run_records"][-1]["success"] is False
 
 
 def test_read_tool_marks_rejected_path_as_domain_failure():
-    message = agent_tools.read_code_file.invoke(
+    tool_call = {
+        "name": "read_code_file",
+        "args": {"file_path": "../backend/.env"},
+        "id": "read-call",
+        "type": "tool_call",
+    }
+    graph_builder = StateGraph(State)
+    graph_builder.add_node("tools", ToolNode([agent_tools.read_code_file]))
+    graph_builder.add_edge(START, "tools")
+    graph_builder.add_edge("tools", END)
+    workspace_state = agent_workspace.create_run_workspace()
+    message = graph_builder.compile().invoke(
         {
-            "name": "read_code_file",
-            "args": {"file_path": "../backend/.env"},
-            "id": "read-call",
-            "type": "tool_call",
+            "messages": [AIMessage(content="", tool_calls=[tool_call])],
+            "retry_count": 0,
+            **workspace_state,
         }
-    )
+    )["messages"][-1]
+    agent_workspace.cleanup_run_workspace(workspace_state["workspace_id"])
 
     assert isinstance(message, ToolMessage)
+    assert message.artifact is not None, message.content
     assert message.artifact["success"] is False
     assert message.artifact["failure_kind"] == "read_error"
 

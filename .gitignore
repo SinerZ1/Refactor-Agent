@@ -17,3 +17,6 @@ __pycache__/
 .pytest_tmp/
 .pytest_cache/
 .mypy_cache/
+
+# Agent 每次 run 的隔离重构快照（成功、拒绝或失败后自动清理）
+/.refactor-workspaces/

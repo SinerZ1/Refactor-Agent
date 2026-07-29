@@ -531,14 +531,14 @@ def refactor_code_stream(request: RefactorRequest, http_request: Request):
                             serialize_run_event(
                                 make_agent_event(
                                     "approval.waiting",
-                                    "等待用户确认文件写入",
-                                    node="developer",
+                                    "等待用户审批最终聚合 diff",
+                                    node="workflow",
                                     task_id=(
                                         str(active_task_id)
                                         if active_task_id is not None
                                         else None
                                     ),
-                                    tool="write_code_file",
+                                    tool="apply_workspace_changes",
                                     payload=interrupt_payload,
                                 )
                             )
@@ -564,7 +564,13 @@ def refactor_code_stream(request: RefactorRequest, http_request: Request):
                             )
                     else:
                         review_status = state.values.get("review_status")
-                        if review_status == "success" and not stream_failed:
+                        workspace_id = state.values.get("workspace_id")
+                        workspace_applied = state.values.get("workspace_applied", False)
+                        if (
+                            review_status == "success"
+                            and (not workspace_id or workspace_applied)
+                            and not stream_failed
+                        ):
                             enqueue(
                                 serialize_run_event(
                                     make_agent_event(

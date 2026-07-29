@@ -28,6 +28,13 @@ from .scheduler import complete_active_task_node, schedule_next_task_node
 # 使用高内聚相对导入，解耦子包结构
 from .state import State
 from .tools import architect_tools, developer_tools, reviewer_tools
+from .workspace import (
+    apply_workspace_changes_node,
+    cleanup_workspace_node,
+    initialize_workspace_node,
+    prepare_workspace_approval_node,
+    route_workspace_preparation,
+)
 
 # 确保在工作流定义与 checkpointer 初始化前加载环境变量
 load_dotenv()
@@ -62,6 +69,15 @@ workflow.add_node("finalize_budget_failure", finalize_budget_failure_node)
 workflow.add_node("finalize_plan_failure", finalize_plan_failure_node)
 workflow.add_node("finalize_review_success", finalize_review_success_node)
 workflow.add_node("finalize_review_failure", finalize_review_failure_node)
+# LangGraph 1.0 的 StateGraph 泛型存根会把新增的精确 ``State -> dict`` 节点
+# 误推断为 ``Never``；运行时仍由已声明的 State schema 校验输入输出。
+workflow.add_node(
+    "initialize_workspace",
+    initialize_workspace_node,  # type: ignore[arg-type]
+)
+workflow.add_node("prepare_workspace_approval", prepare_workspace_approval_node)
+workflow.add_node("apply_workspace", apply_workspace_changes_node)
+workflow.add_node("cleanup_workspace", cleanup_workspace_node)
 
 # 注册绑定的工具节点 (ToolNode)
 workflow.add_node("architect_tools", ToolNode(architect_tools))
@@ -71,7 +87,8 @@ workflow.add_node("reviewer_tools", ToolNode(reviewer_tools))
 # ============================================================
 # 设置连线与条件边关系
 # ============================================================
-workflow.add_edge(START, "architect")
+workflow.add_edge(START, "initialize_workspace")
+workflow.add_edge("initialize_workspace", "architect")
 
 # Architect 条件边路由
 workflow.add_conditional_edges(
@@ -128,10 +145,20 @@ workflow.add_conditional_edges(
 )
 workflow.add_edge("reviewer_tools", "reviewer")
 workflow.add_edge("reviewer_protocol_retry", "reviewer")
-workflow.add_edge("finalize_budget_failure", END)
-workflow.add_edge("finalize_plan_failure", END)
-workflow.add_edge("finalize_review_success", END)
-workflow.add_edge("finalize_review_failure", END)
+workflow.add_edge("finalize_budget_failure", "cleanup_workspace")
+workflow.add_edge("finalize_plan_failure", "cleanup_workspace")
+workflow.add_edge("finalize_review_success", "prepare_workspace_approval")
+workflow.add_conditional_edges(
+    "prepare_workspace_approval",
+    route_workspace_preparation,
+    {
+        "apply_workspace": "apply_workspace",
+        "cleanup_workspace": "cleanup_workspace",
+    },
+)
+workflow.add_edge("apply_workspace", END)
+workflow.add_edge("finalize_review_failure", "cleanup_workspace")
+workflow.add_edge("cleanup_workspace", END)
 
 
 def _safe_connection_url(connection_url: str) -> str:
