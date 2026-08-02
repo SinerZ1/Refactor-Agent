@@ -34,13 +34,18 @@ class ChangeRecord(TypedDict):
 
 
 class TestRunRecord(TypedDict):
-    """Reviewer 工具生成的测试事实；摘要把结果绑定到精确的变更集合。"""
+    """Reviewer 工具生成的测试事实；可信身份来自完整工作区快照。"""
 
     suite: str
     success: bool
     exit_code: int
     change_set_digest: str
+    workspace_snapshot_digest: str
+    workspace_stable: bool
+    behavior_contract_included: bool
+    success_marker_present: bool
     output_excerpt: str
+    failure_kind: NotRequired[str]
 
 
 class ReviewEvidence(TypedDict):
@@ -48,6 +53,7 @@ class ReviewEvidence(TypedDict):
 
     changed_files: list[str]
     change_set_digest: str
+    workspace_snapshot_digest: str
     test_suite: str
     test_success: bool
     test_exit_code: int
@@ -114,11 +120,11 @@ def merge_test_run_records(
 
 
 def compute_change_set_digest(change_records: list[ChangeRecord]) -> str:
-    """计算当前有界写入序列的稳定摘要。
+    """计算当前有界写入审计序列的稳定摘要。
 
     摘要包含每次成功写入的路径与前后哈希，而不是只看最终文件内容。因此 Developer
-    即使再次写入相同内容，写入序列也会变化，先前测试记录随即因摘要不匹配而失效。
-    这相当于把测试证据绑定到不可变构建产物，而不是绑定到模型的自然语言声明。
+    即使再次写入相同内容，写入序列也会变化。它继续服务 UI 与审计，但由于记录有界，
+    不再承担代码内容身份；可信测试证据改由完整工作区快照摘要提供。
     """
 
     digest_payload = [
@@ -156,8 +162,29 @@ def review_evidence_errors(state: "State") -> list[str]:
         errors.append("最新变更集合尚未测试，已有测试证据已失效")
     if latest_test["exit_code"] != 0 or not latest_test["success"]:
         errors.append(f"最新测试未通过（退出码 {latest_test['exit_code']}）")
-    if "CodeSmells" not in latest_test["suite"]:
-        errors.append("最新测试套件未包含 CodeSmells")
+    if not latest_test.get("workspace_stable", False):
+        errors.append("测试过程改变了受管理源码，测试证据无效")
+    if not latest_test.get("behavior_contract_included", False):
+        errors.append("最新测试套件未包含可信 CodeSmells 行为契约")
+    if not latest_test.get("success_marker_present", False):
+        errors.append("最新测试记录缺少成功标记")
+
+    workspace_id = state.get("workspace_id")
+    if not workspace_id:
+        errors.append("运行缺少隔离工作区，无法复核测试快照")
+    else:
+        try:
+            # 延迟导入避免 state/workspace 的类型定义形成模块初始化环。
+            from .workspace import build_workspace_snapshot
+
+            current_snapshot = build_workspace_snapshot(workspace_id)
+            if (
+                latest_test.get("workspace_snapshot_digest")
+                != current_snapshot["digest"]
+            ):
+                errors.append("当前工作区已偏离成功测试绑定的完整快照")
+        except Exception as exc:
+            errors.append(f"无法复核当前工作区快照: {exc}")
     return errors
 
 
@@ -194,6 +221,7 @@ class State(TypedDict):
     workspace_id: NotRequired[str | None]
     baseline_file_hashes: NotRequired[dict[str, str]]
     final_file_hashes: NotRequired[dict[str, str]]
+    final_workspace_snapshot_digest: NotRequired[str]
     aggregate_diff: NotRequired[str]
     workspace_changed_files: NotRequired[list[str]]
     workspace_approved: NotRequired[bool]

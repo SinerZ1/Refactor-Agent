@@ -1,5 +1,7 @@
+import pytest
 from langchain_core.messages import AIMessage
 
+import agent.workspace as agent_workspace
 from agent.edges import route_architect, route_developer, route_reviewer
 from agent.nodes import (
     finalize_budget_failure_node,
@@ -10,6 +12,22 @@ from agent.nodes import (
 from agent.state import ChangeRecord
 from agent.state import TestRunRecord as StructuredTestRunRecord
 from agent.state import compute_change_set_digest
+
+SNAPSHOT_DIGEST = "snapshot-digest"
+
+
+@pytest.fixture(autouse=True)
+def deterministic_workspace_snapshot(monkeypatch):
+    monkeypatch.setattr(
+        agent_workspace,
+        "build_workspace_snapshot",
+        lambda _workspace_id: {"version": 1, "files": [], "digest": SNAPSHOT_DIGEST},
+    )
+    monkeypatch.setattr(
+        agent_workspace,
+        "workspace_changed_paths",
+        lambda _workspace_id: ["CodeSmells/example.py"],
+    )
 
 
 def _change_record(file_path: str = "CodeSmells/example.py") -> ChangeRecord:
@@ -36,6 +54,10 @@ def _test_record(
         "success": success,
         "exit_code": exit_code,
         "change_set_digest": compute_change_set_digest(change_records),
+        "workspace_snapshot_digest": SNAPSHOT_DIGEST,
+        "workspace_stable": True,
+        "behavior_contract_included": "CodeSmells" in suite,
+        "success_marker_present": success,
         "output_excerpt": "tests passed" if success else "tests failed",
     }
 
@@ -53,6 +75,7 @@ def _state(
         "retry_count": retries,
         "review_protocol_errors": protocol_errors,
         "review_status": "running",
+        "workspace_id": "unit-workspace",
         "change_records": changes or [],
         "test_run_records": tests or [],
     }
@@ -116,6 +139,7 @@ def test_current_codesmells_test_and_success_marker_reach_success_terminal():
     assert terminal["review_evidence"] == {
         "changed_files": ["CodeSmells/example.py"],
         "change_set_digest": compute_change_set_digest(changes),
+        "workspace_snapshot_digest": SNAPSHOT_DIGEST,
         "test_suite": "backend/tests + CodeSmells",
         "test_success": True,
         "test_exit_code": 0,

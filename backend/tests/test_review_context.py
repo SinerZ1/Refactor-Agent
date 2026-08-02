@@ -37,7 +37,11 @@ def _test_record(index: int = 0) -> StructuredTestRunRecord:
         "success": True,
         "exit_code": 0,
         "change_set_digest": f"digest-{index}",
-        "output_excerpt": "passed",
+        "workspace_snapshot_digest": f"snapshot-{index}",
+        "workspace_stable": True,
+        "behavior_contract_included": True,
+        "success_marker_present": True,
+        "output_excerpt": f"passed\n{agent_tools.TEST_SUCCESS_MARKER}",
     }
 
 
@@ -182,8 +186,13 @@ def test_run_unit_tests_updates_state_with_bounded_versioned_record(monkeypatch)
     assert test_record["success"] is True
     assert test_record["exit_code"] == 0
     assert test_record["change_set_digest"] == compute_change_set_digest(changes)
+    assert test_record["workspace_snapshot_digest"]
+    assert test_record["workspace_stable"] is True
+    assert test_record["behavior_contract_included"] is True
+    assert test_record["success_marker_present"] is True
     assert len(test_record["output_excerpt"]) <= agent_tools.MAX_TEST_OUTPUT_CHARS
     assert "测试输出已截断" in test_record["output_excerpt"]
+    assert agent_tools.TEST_SUCCESS_MARKER in test_record["output_excerpt"]
 
 
 def test_run_unit_tests_records_execution_exception(monkeypatch):

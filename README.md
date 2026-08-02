@@ -12,7 +12,7 @@ Refactor-Agent 是一个面向 Python 历史代码的多智能体重构工作台
 - Architect 计划经 schema、路径、依赖和环检测后成为真实执行控制面。
 - 稳定的串行拓扑调度，支持任务级状态、最多 3 次重试、下游重开与依赖阻断。
 - run 级 `baseline/working` 双快照；Agent 全程不直接修改用户源码。
-- Reviewer 成功必须同时满足写入记录、最新变更对应的测试记录、退出码和成功协议。
+- Reviewer 成功必须同时满足写入记录、完整工作区快照绑定、测试前后源码不变、可信行为契约、退出码与成功协议。
 - 可信行为契约位于 Agent 不可写的 `backend/behavior_tests/`；Reviewer 以固定测试代码验证当前 run 的隔离 `working/CodeSmells`，计划、写工具与最终应用都会拒绝触碰测试边界。
 - 最终完整聚合 diff 只审批一次；批准时执行基线冲突检测、原子替换与补偿回滚。
 - SSE 传输版本化结构事件，WebSocket 承载 A2A 消息与低延迟审批通知。

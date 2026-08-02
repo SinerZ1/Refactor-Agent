@@ -12,7 +12,7 @@ from langgraph.types import Command
 
 from .path_policy import PathPolicyError, canonical_refactor_path
 from .state import ChangeRecord, State, TestRunRecord, compute_change_set_digest
-from .workspace import resolve_workspace_path
+from .workspace import build_workspace_snapshot, resolve_workspace_path
 
 # ============================================================
 # 教学说明: 智能体工具库 (Agent Tooling)
@@ -28,6 +28,7 @@ REFACTOR_ROOT = (PROJECT_ROOT / "CodeSmells").resolve()
 MAX_CODE_FILE_BYTES = 1_000_000
 MAX_REVIEW_DIFF_CHARS = 12_000
 MAX_TEST_OUTPUT_CHARS = 8_000
+TEST_SUCCESS_MARKER = "[REFACTOR_TESTS_PASSED]"
 
 
 def get_project_root() -> str:
@@ -125,6 +126,9 @@ def write_code_file(
         }
         if change_record is not None:
             update["change_records"] = [change_record]
+            # 显式清空旧记录可让 UI 立即反映证据失效；真正的安全判断仍会在每个
+            # 后续门禁重新计算文件系统快照，不能把这个状态字段当作唯一依据。
+            update["test_run_records"] = []
         if active_task_id is not None:
             update["active_task_write_succeeded"] = success
             update["active_task_failure_reason"] = None if success else message
@@ -276,6 +280,9 @@ def run_unit_tests(
         "all": "backend/tests + backend/behavior_tests (CodeSmells contract)",
     }
     change_set_digest = compute_change_set_digest(state.get("change_records", []))
+    workspace_snapshot_digest = ""
+    workspace_stable = False
+    behavior_contract_included = test_suite in {"codesmells", "all"}
 
     def bounded_output(output: str) -> str:
         """限制 ToolMessage 与 Checkpoint 日志体积，避免测试噪声放大状态存储。"""
@@ -283,9 +290,12 @@ def run_unit_tests(
         if len(output) <= MAX_TEST_OUTPUT_CHARS:
             return output
         truncation_marker = "\n... [测试输出已截断]"
-        return (
-            output[: MAX_TEST_OUTPUT_CHARS - len(truncation_marker)] + truncation_marker
+        success_suffix = (
+            f"\n{TEST_SUCCESS_MARKER}" if TEST_SUCCESS_MARKER in output else ""
         )
+        return output[
+            : MAX_TEST_OUTPUT_CHARS - len(truncation_marker) - len(success_suffix)
+        ] + (truncation_marker + success_suffix)
 
     def tool_result(
         *,
@@ -295,19 +305,30 @@ def run_unit_tests(
         failure_kind: str | None = None,
     ) -> Command:
         output_excerpt = bounded_output(output)
+        success_marker_present = TEST_SUCCESS_MARKER in output_excerpt
         record: TestRunRecord = {
             "suite": suite_labels[test_suite],
             "success": success,
             "exit_code": exit_code,
             "change_set_digest": change_set_digest,
+            "workspace_snapshot_digest": workspace_snapshot_digest,
+            "workspace_stable": workspace_stable,
+            "behavior_contract_included": behavior_contract_included,
+            "success_marker_present": success_marker_present,
             "output_excerpt": output_excerpt,
         }
+        if failure_kind is not None:
+            record["failure_kind"] = failure_kind
         artifact: dict = {
             "success": success,
             "test_suite": test_suite,
             "suite": record["suite"],
             "exit_code": exit_code,
             "change_set_digest": change_set_digest,
+            "workspace_snapshot_digest": workspace_snapshot_digest,
+            "workspace_stable": workspace_stable,
+            "behavior_contract_included": behavior_contract_included,
+            "success_marker_present": success_marker_present,
         }
         if failure_kind is not None:
             artifact["failure_kind"] = failure_kind
@@ -332,11 +353,13 @@ def run_unit_tests(
         )
 
     try:
-        encoding_format = "gbk" if os.name == "nt" else "utf-8"
-        python_executable = PROJECT_ROOT / "backend" / "venv" / "Scripts" / "python.exe"
         workspace_id = state.get("workspace_id")
         if not workspace_id:
             raise ValueError("当前运行缺少隔离工作区")
+        snapshot_before = build_workspace_snapshot(workspace_id)
+        workspace_snapshot_digest = snapshot_before["digest"]
+        encoding_format = "gbk" if os.name == "nt" else "utf-8"
+        python_executable = PROJECT_ROOT / "backend" / "venv" / "Scripts" / "python.exe"
         workspace_root = resolve_workspace_path(workspace_id, "CodeSmells").parent
         test_targets = {
             "backend": [str(PROJECT_ROOT / "backend" / "tests")],
@@ -384,12 +407,30 @@ def run_unit_tests(
         output = output.strip()
         if not output:
             output = "<无任何标准输出或错误输出 (No output)>"
-        success = result.returncode == 0
+        snapshot_after = build_workspace_snapshot(workspace_id)
+        workspace_stable = snapshot_before["digest"] == snapshot_after["digest"]
+        process_succeeded = result.returncode == 0
+        if process_succeeded and workspace_stable:
+            output = f"{output}\n{TEST_SUCCESS_MARKER}"
+        elif not workspace_stable:
+            output = (
+                f"{output}\n[WORKSPACE_MUTATED_BY_TESTS] "
+                f"before={snapshot_before['digest']} after={snapshot_after['digest']}"
+            )
+        success = process_succeeded and workspace_stable
         return tool_result(
             output=output,
             success=success,
             exit_code=result.returncode,
-            failure_kind=None if success else "test_failure",
+            failure_kind=(
+                None
+                if success
+                else (
+                    "workspace_mutated_by_tests"
+                    if not workspace_stable
+                    else "test_failure"
+                )
+            ),
         )
     except Exception as e:
         return tool_result(

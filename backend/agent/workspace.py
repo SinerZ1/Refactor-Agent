@@ -1,13 +1,15 @@
 import atexit
 import difflib
 import hashlib
+import json
 import os
 import re
 import shutil
 import tempfile
 import uuid
-from pathlib import Path
-from typing import Any
+from collections.abc import Iterable
+from pathlib import Path, PurePosixPath
+from typing import Any, Literal, TypedDict
 
 from langgraph.errors import GraphInterrupt
 from langgraph.types import interrupt
@@ -20,6 +22,26 @@ REFACTOR_ROOT = (PROJECT_ROOT / "CodeSmells").resolve()
 WORKSPACE_ROOT = (PROJECT_ROOT / ".refactor-workspaces").resolve()
 MAX_AGGREGATE_DIFF_CHARS = 500_000
 _WORKSPACE_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
+SNAPSHOT_VERSION: Literal[1] = 1
+SNAPSHOT_IGNORED_DIRECTORIES = frozenset({"__pycache__", ".pytest_cache"})
+SNAPSHOT_IGNORED_FILE_NAMES = frozenset({".coverage"})
+
+
+class WorkspaceFileSnapshot(TypedDict):
+    """源码快照中的单个确定性文件事实。"""
+
+    path: str
+    file_type: Literal["regular"]
+    size_bytes: int
+    sha256: str
+
+
+class WorkspaceSnapshot(TypedDict):
+    """完整 managed source tree 的内容寻址清单。"""
+
+    version: Literal[1]
+    files: list[WorkspaceFileSnapshot]
+    digest: str
 
 
 class WorkspaceError(RuntimeError):
@@ -122,16 +144,101 @@ def _iter_snapshot_files(snapshot_root: Path) -> dict[str, Path]:
     files: dict[str, Path] = {}
     for path in code_root.rglob("*"):
         relative_parts = path.relative_to(code_root).parts
-        if (
-            "__pycache__" in relative_parts
-            or ".pytest_cache" in relative_parts
-            or path.suffix == ".pyc"
-        ):
+        if any(part in SNAPSHOT_IGNORED_DIRECTORIES for part in relative_parts):
             continue
+        if path.is_symlink() or getattr(path, "is_junction", lambda: False)():
+            raise WorkspaceError("隔离工作区包含符号链接或目录联接，拒绝生成快照")
         if path.is_file():
+            if (
+                path.suffix.casefold() == ".pyc"
+                or path.name in SNAPSHOT_IGNORED_FILE_NAMES
+                or path.name.startswith(".coverage.")
+            ):
+                continue
             relative = path.relative_to(snapshot_root).as_posix()
             files[relative] = path
     return files
+
+
+def _normalize_snapshot_path(relative_path: str) -> str:
+    """统一 Windows/POSIX 表达，并拒绝快照清单中的路径歧义。"""
+
+    normalized = PurePosixPath(relative_path.replace("\\", "/"))
+    if normalized.is_absolute() or ".." in normalized.parts:
+        raise WorkspaceError("工作区快照包含非法相对路径")
+    canonical = normalized.as_posix()
+    if not canonical.startswith("CodeSmells/"):
+        raise WorkspaceError("工作区快照包含非 CodeSmells 文件")
+    return canonical
+
+
+def build_snapshot_manifest(
+    entries: Iterable[tuple[str, bytes]],
+) -> WorkspaceSnapshot:
+    """从完整文件序列构造顺序无关、时间无关的内容寻址清单。
+
+    这对应可复现构建中的 Merkle-root 思路：操作日志可以被截断用于 UI，但测试证据
+    绑定的是所有受管理文件的规范路径、类型、大小与内容哈希。摘要不包含 mtime、枚举
+    顺序或平台分隔符，因此同一候选树在 Windows 与 POSIX 上具有相同身份。
+    """
+
+    files_by_identity: dict[str, WorkspaceFileSnapshot] = {}
+    for relative_path, content in entries:
+        canonical = _normalize_snapshot_path(relative_path)
+        identity = canonical.casefold()
+        if identity in files_by_identity:
+            raise WorkspaceError(f"工作区快照包含大小写冲突路径: {canonical}")
+        files_by_identity[identity] = {
+            "path": canonical,
+            "file_type": "regular",
+            "size_bytes": len(content),
+            "sha256": _sha256_bytes(content),
+        }
+    files = sorted(
+        files_by_identity.values(),
+        key=lambda item: (item["path"].casefold(), item["path"]),
+    )
+    payload = {"version": SNAPSHOT_VERSION, "files": files}
+    canonical_json = json.dumps(
+        payload,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return {
+        "version": SNAPSHOT_VERSION,
+        "files": files,
+        "digest": _sha256_bytes(canonical_json.encode("utf-8")),
+    }
+
+
+def build_workspace_snapshot(
+    workspace_id: str,
+    snapshot: Literal["baseline", "working"] = "working",
+) -> WorkspaceSnapshot:
+    snapshot_root = _snapshot_root(workspace_id, snapshot)
+    files = _iter_snapshot_files(snapshot_root)
+    return build_snapshot_manifest(
+        (relative, path.read_bytes()) for relative, path in files.items()
+    )
+
+
+def workspace_changed_paths(workspace_id: str) -> list[str]:
+    """返回 baseline 与 working 的完整字节级变化，而不是有界写入日志。"""
+
+    baseline_files = _iter_snapshot_files(_snapshot_root(workspace_id, "baseline"))
+    final_files = _iter_snapshot_files(_snapshot_root(workspace_id, "working"))
+    _assert_no_protected_changes(baseline_files, final_files)
+    return [
+        relative
+        for relative in sorted(set(baseline_files) | set(final_files))
+        if (
+            baseline_files[relative].read_bytes()
+            if relative in baseline_files
+            else None
+        )
+        != (final_files[relative].read_bytes() if relative in final_files else None)
+    ]
 
 
 def _hash_snapshot(snapshot_root: Path) -> dict[str, str]:
@@ -176,6 +283,7 @@ def create_run_workspace() -> dict[str, Any]:
         "workspace_id": workspace_id,
         "baseline_file_hashes": baseline_hashes,
         "final_file_hashes": {},
+        "final_workspace_snapshot_digest": "",
         "aggregate_diff": "",
         "workspace_approved": False,
         "workspace_applied": False,
@@ -267,10 +375,19 @@ def prepare_workspace_approval_node(state: State) -> dict[str, Any]:
             "workspace_error": "运行缺少隔离工作区",
         }
     try:
+        from .state import review_evidence_errors
+
+        evidence_errors = review_evidence_errors(state)
+        if evidence_errors:
+            raise WorkspaceError(
+                "最终审批前测试证据失效: " + "；".join(evidence_errors)
+            )
         aggregate_diff, final_hashes, changed_files = build_aggregate_diff(workspace_id)
+        final_snapshot = build_workspace_snapshot(workspace_id)
         return {
             "aggregate_diff": aggregate_diff,
             "final_file_hashes": final_hashes,
+            "final_workspace_snapshot_digest": final_snapshot["digest"],
             "workspace_changed_files": changed_files,
             "workspace_error": None,
         }
@@ -342,6 +459,17 @@ def atomic_apply_workspace(state: State) -> None:
     baseline_files = _iter_snapshot_files(baseline_root)
     final_files = _iter_snapshot_files(working_root)
     _assert_no_protected_changes(baseline_files, final_files)
+    current_snapshot = build_workspace_snapshot(workspace_id)
+    review_evidence = state.get("review_evidence")
+    reviewed_digest = (
+        review_evidence.get("workspace_snapshot_digest")
+        if review_evidence is not None
+        else None
+    )
+    if not reviewed_digest or current_snapshot["digest"] != reviewed_digest:
+        raise WorkspaceError("当前工作区已偏离 Reviewer 成功测试快照，拒绝应用")
+    if current_snapshot["digest"] != state.get("final_workspace_snapshot_digest", ""):
+        raise WorkspaceError("审批后的完整工作区快照已改变，拒绝应用")
     changed = [
         relative
         for relative in sorted(set(baseline_files) | set(final_files))

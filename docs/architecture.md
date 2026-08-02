@@ -114,12 +114,13 @@ Developer 上下文包含当前任务、已完成依赖和唯一允许写入路�
 Reviewer 没有文件读取或写入工具，唯一工具是 `run_unit_tests`。成功终态必须同时满足：
 
 1. 至少存在一次成功的 Developer 写入；
-2. 测试记录与最新变更摘要绑定，Developer 再写入后旧证据失效；
-3. 测试套件覆盖 `CodeSmells/`；
-4. 测试进程退出码为 0；
-5. 工具输出包含成功标记；
+2. 测试记录绑定所有可应用文件的规范路径、类型、大小和内容哈希组成的完整工作区摘要；
+3. 测试前后快照一致，测试不能把源码副作用伪装成通过结果；
+4. 测试套件包含 Agent 不可写的可信行为契约；
+5. 测试进程退出码为 0且工具输出包含成功标记；
 6. Reviewer 文本包含 `【REFACTOR_SUCCESS】`；
-7. Reviewer 的结构化结果与当前任务/计划状态一致。
+7. Reviewer 的结构化结果与当前任务/计划状态一致；
+8. 成功终态、聚合 diff、HITL 与正式应用持续复核同一个快照摘要。
 
 任一条件缺失都会重试 Reviewer、打回 Developer 或进入失败终态。模型声明“测试已通过”不能伪造工具证据。
 
@@ -139,7 +140,7 @@ Reviewer 没有文件读取或写入工具，唯一工具是 `run_unit_tests`。
 `baseline` 保存 run 开始时的用户源码快照，`working` 是 Developer 和 Reviewer 的唯一操作目标。最终审批前：
 
 1. 比较两份快照生成跨文件统一 diff；
-2. 固化 baseline、working 的逐文件 SHA-256；
+2. 固化 baseline、working 的逐文件 SHA-256 与确定性完整工作区摘要；
 3. checkpoint 保存 diff、哈希、变更文件清单，不保存 API Key；
 4. LangGraph `interrupt` 暂停状态机。
 
@@ -147,6 +148,7 @@ Reviewer 没有文件读取或写入工具，唯一工具是 `run_unit_tests`。
 
 - baseline 快照未被篡改；
 - working 快照与用户看到的 diff 一致；
+- working 快照仍与 Reviewer 成功测试及最终审批绑定的摘要一致；
 - 用户真实 `CodeSmells/` 仍与 run 开始时的 baseline 哈希一致。
 
 应用阶段先在每个目标同目录创建并关闭临时文件，随后用 `os.replace` 替换。已有文件会先移动到备份；任一步失败时按逆序执行补偿。拒绝、预算失败、测试失败、断连和异常终态都会清理 run 工作区，并保持用户源码不变。

@@ -9,7 +9,7 @@ from langgraph.types import Command
 
 import agent.tools as agent_tools
 import agent.workspace as agent_workspace
-from agent.state import State
+from agent.state import State, compute_change_set_digest
 
 
 @pytest.fixture
@@ -40,6 +40,44 @@ def _workspace_with_changes(
             state["workspace_id"], f"CodeSmells/{relative}"
         )
         target.write_text(after, encoding="utf-8")
+    snapshot = agent_workspace.build_workspace_snapshot(state["workspace_id"])
+    changed_files = agent_workspace.workspace_changed_paths(state["workspace_id"])
+    change_records = [
+        {
+            "file_path": changed_files[0],
+            "before_sha256": "before",
+            "after_sha256": "after",
+            "added_lines": 1,
+            "removed_lines": 1,
+            "unified_diff": "-before\n+after",
+            "diff_truncated": False,
+        }
+    ]
+    change_digest = compute_change_set_digest(change_records)
+    state.update(
+        change_records=change_records,
+        test_run_records=[
+            {
+                "suite": "backend/behavior_tests (CodeSmells contract)",
+                "success": True,
+                "exit_code": 0,
+                "change_set_digest": change_digest,
+                "workspace_snapshot_digest": snapshot["digest"],
+                "workspace_stable": True,
+                "behavior_contract_included": True,
+                "success_marker_present": True,
+                "output_excerpt": agent_tools.TEST_SUCCESS_MARKER,
+            }
+        ],
+        review_evidence={
+            "changed_files": changed_files,
+            "change_set_digest": change_digest,
+            "workspace_snapshot_digest": snapshot["digest"],
+            "test_suite": "backend/behavior_tests (CodeSmells contract)",
+            "test_success": True,
+            "test_exit_code": 0,
+        },
+    )
     prepared = agent_workspace.prepare_workspace_approval_node(state)
     state.update(prepared)
     return state

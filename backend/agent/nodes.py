@@ -361,6 +361,18 @@ def render_review_context(
                     f"- success: {str(test_record['success']).lower()}",
                     f"- exit_code: {test_record['exit_code']}",
                     f"- change_set_digest: {test_record['change_set_digest']}",
+                    (
+                        "- workspace_snapshot_digest: "
+                        f"{test_record.get('workspace_snapshot_digest', '<missing>')}"
+                    ),
+                    (
+                        "- workspace_stable: "
+                        f"{str(test_record.get('workspace_stable', False)).lower()}"
+                    ),
+                    (
+                        "- behavior_contract_included: "
+                        f"{str(test_record.get('behavior_contract_included', False)).lower()}"
+                    ),
                     "```text",
                     test_record["output_excerpt"],
                     "```",
@@ -456,9 +468,19 @@ def finalize_review_success_node(state: State):
 
     change_records = state.get("change_records", [])
     latest_test = state.get("test_run_records", [])[-1]
+    workspace_id = state.get("workspace_id")
+    if not workspace_id:
+        return {
+            "messages": [AIMessage(content="【REFACTOR_FAIL】运行缺少隔离工作区。")],
+            "review_status": "failed",
+            "review_evidence": None,
+        }
+    from .workspace import workspace_changed_paths
+
     evidence: ReviewEvidence = {
-        "changed_files": list(dict.fromkeys(r["file_path"] for r in change_records)),
+        "changed_files": workspace_changed_paths(workspace_id),
         "change_set_digest": compute_change_set_digest(change_records),
+        "workspace_snapshot_digest": latest_test["workspace_snapshot_digest"],
         "test_suite": latest_test["suite"],
         "test_success": latest_test["success"],
         "test_exit_code": latest_test["exit_code"],
