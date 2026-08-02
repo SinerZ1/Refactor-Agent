@@ -1,3 +1,4 @@
+import threading
 from pathlib import Path
 
 import pytest
@@ -28,9 +29,11 @@ def isolated_project(tmp_path, monkeypatch):
 
 def _workspace_with_changes(
     code_root: Path,
-    changes: dict[str, tuple[str, str]],
+    changes: dict[str, tuple[str | None, str | None]],
 ) -> dict:
     for relative, (before, _after) in changes.items():
+        if before is None:
+            continue
         target = code_root / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(before, encoding="utf-8")
@@ -39,7 +42,11 @@ def _workspace_with_changes(
         target = agent_workspace.resolve_workspace_path(
             state["workspace_id"], f"CodeSmells/{relative}"
         )
-        target.write_text(after, encoding="utf-8")
+        if after is None:
+            target.unlink()
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(after, encoding="utf-8")
     snapshot = agent_workspace.build_workspace_snapshot(state["workspace_id"])
     changed_files = agent_workspace.workspace_changed_paths(state["workspace_id"])
     change_records = [
@@ -168,6 +175,236 @@ def test_external_baseline_change_is_never_overwritten(isolated_project):
         agent_workspace.atomic_apply_workspace(state)
 
     assert (code_root / "example.py").read_text(encoding="utf-8") == "external-edit\n"
+
+
+def test_unrelated_source_change_fails_full_baseline_check_before_writes(
+    isolated_project,
+):
+    _project_root, code_root = isolated_project
+    (code_root / "unrelated.py").write_text("original\n", encoding="utf-8")
+    state = _workspace_with_changes(
+        code_root, {"example.py": ("baseline\n", "candidate\n")}
+    )
+    (code_root / "unrelated.py").write_text("external\n", encoding="utf-8")
+
+    with pytest.raises(agent_workspace.BaselineConflictError) as failure:
+        agent_workspace.atomic_apply_workspace(state)
+
+    assert failure.value.detail["phase"] == "全量预检"
+    assert (code_root / "example.py").read_text(encoding="utf-8") == "baseline\n"
+    assert (code_root / "unrelated.py").read_text(encoding="utf-8") == "external\n"
+
+
+def test_external_change_after_preflight_before_first_replace_is_rejected(
+    isolated_project,
+):
+    _project_root, code_root = isolated_project
+    state = _workspace_with_changes(
+        code_root, {"example.py": ("baseline\n", "candidate\n")}
+    )
+
+    def mutate_after_preflight(phase, _relative):
+        if phase == "after_preflight":
+            (code_root / "example.py").write_text("external\n", encoding="utf-8")
+
+    with pytest.raises(agent_workspace.AtomicApplyError) as failure:
+        agent_workspace.atomic_apply_workspace(state, hook=mutate_after_preflight)
+
+    assert failure.value.detail["rollback_status"] == "not_required"
+    assert failure.value.detail["conflicts"] == ["CodeSmells/example.py"]
+    assert (code_root / "example.py").read_text(encoding="utf-8") == "external\n"
+    assert not list(code_root.rglob("*.prepared-*"))
+    assert not list(code_root.rglob("*.backup-*"))
+
+
+def test_conflict_between_replacements_rolls_back_prior_file(isolated_project):
+    _project_root, code_root = isolated_project
+    state = _workspace_with_changes(
+        code_root,
+        {
+            "first.py": ("first-old\n", "first-new\n"),
+            "second.py": ("second-old\n", "second-new\n"),
+        },
+    )
+
+    def mutate_second_after_first(phase, relative):
+        if phase == "after_replace" and relative == "CodeSmells/first.py":
+            (code_root / "second.py").write_text("external-second\n", encoding="utf-8")
+
+    with pytest.raises(agent_workspace.AtomicApplyError) as failure:
+        agent_workspace.atomic_apply_workspace(state, hook=mutate_second_after_first)
+
+    assert failure.value.rolled_back is True
+    assert failure.value.detail["rollback_status"] == "complete"
+    assert (code_root / "first.py").read_text(encoding="utf-8") == "first-old\n"
+    assert (code_root / "second.py").read_text(encoding="utf-8") == "external-second\n"
+
+
+def test_rollback_never_overwrites_third_party_edit_and_preserves_backup(
+    isolated_project,
+):
+    _project_root, code_root = isolated_project
+    state = _workspace_with_changes(
+        code_root,
+        {
+            "first.py": ("first-old\n", "first-new\n"),
+            "second.py": ("second-old\n", "second-new\n"),
+        },
+    )
+
+    def create_two_conflicts(phase, relative):
+        if phase == "after_replace" and relative == "CodeSmells/first.py":
+            (code_root / "first.py").write_text("third-party-first\n", encoding="utf-8")
+            (code_root / "second.py").write_text(
+                "third-party-second\n", encoding="utf-8"
+            )
+
+    with pytest.raises(agent_workspace.AtomicApplyError) as failure:
+        agent_workspace.atomic_apply_workspace(state, hook=create_two_conflicts)
+
+    assert failure.value.rolled_back is False
+    assert failure.value.detail["rollback_status"] == "partial"
+    assert failure.value.detail["conflicts"] == [
+        "CodeSmells/second.py",
+        "CodeSmells/first.py",
+    ]
+    assert failure.value.detail["recovery_artifacts"]
+    assert (code_root / "first.py").read_text(encoding="utf-8") == "third-party-first\n"
+    assert (code_root / "second.py").read_text(
+        encoding="utf-8"
+    ) == "third-party-second\n"
+    recovery = list(code_root.glob(".first.py.refactor-recovery-*"))
+    assert len(recovery) == 1
+    assert recovery[0].read_text(encoding="utf-8") == "first-old\n"
+
+
+def test_apply_node_keeps_frontend_error_and_adds_structured_partial_rollback(
+    isolated_project, monkeypatch
+):
+    _project_root, code_root = isolated_project
+    state = _workspace_with_changes(
+        code_root, {"example.py": ("baseline\n", "candidate\n")}
+    )
+    graph_builder = StateGraph(State)
+    graph_builder.add_node("apply", agent_workspace.apply_workspace_changes_node)
+    graph_builder.add_edge(START, "apply")
+    graph_builder.add_edge("apply", END)
+    graph = graph_builder.compile(checkpointer=MemorySaver())
+    config = {"configurable": {"thread_id": "structured-partial-rollback"}}
+    graph.invoke(state, config)
+
+    failure = agent_workspace.AtomicApplyError(
+        "需要人工处理",
+        rolled_back=False,
+        rollback_status="partial",
+        conflicts=["CodeSmells/example.py"],
+        recovery_artifacts=["CodeSmells/.example.py.refactor-recovery-test"],
+    )
+    monkeypatch.setattr(
+        agent_workspace,
+        "atomic_apply_workspace",
+        lambda _state: (_ for _ in ()).throw(failure),
+    )
+
+    result = graph.invoke(Command(resume={"approved": True}), config)
+
+    assert result["workspace_error"] == "需要人工处理"
+    assert result["workspace_apply_failure"] == failure.detail
+    assert result["workspace_apply_failure"]["rollback_status"] == "partial"
+
+
+def test_new_file_is_removed_by_safe_compensation(isolated_project):
+    _project_root, code_root = isolated_project
+    state = _workspace_with_changes(
+        code_root,
+        {
+            "new.py": (None, "created\n"),
+            "second.py": ("second-old\n", "second-new\n"),
+        },
+    )
+
+    def conflict_after_create(phase, relative):
+        if phase == "after_replace" and relative == "CodeSmells/new.py":
+            (code_root / "second.py").write_text("external\n", encoding="utf-8")
+
+    with pytest.raises(agent_workspace.AtomicApplyError) as failure:
+        agent_workspace.atomic_apply_workspace(state, hook=conflict_after_create)
+
+    assert failure.value.detail["rollback_status"] == "complete"
+    assert not (code_root / "new.py").exists()
+    assert (code_root / "second.py").read_text(encoding="utf-8") == "external\n"
+
+
+def test_deleted_file_is_restored_by_safe_compensation(isolated_project):
+    _project_root, code_root = isolated_project
+    state = _workspace_with_changes(
+        code_root,
+        {
+            "first.py": ("first-old\n", None),
+            "second.py": ("second-old\n", "second-new\n"),
+        },
+    )
+
+    def conflict_after_delete(phase, relative):
+        if phase == "after_replace" and relative == "CodeSmells/first.py":
+            (code_root / "second.py").write_text("external\n", encoding="utf-8")
+
+    with pytest.raises(agent_workspace.AtomicApplyError) as failure:
+        agent_workspace.atomic_apply_workspace(state, hook=conflict_after_delete)
+
+    assert failure.value.detail["rollback_status"] == "complete"
+    assert (code_root / "first.py").read_text(encoding="utf-8") == "first-old\n"
+    assert (code_root / "second.py").read_text(encoding="utf-8") == "external\n"
+
+
+def test_target_replaced_by_directory_before_commit_fails_safely(isolated_project):
+    _project_root, code_root = isolated_project
+    state = _workspace_with_changes(
+        code_root, {"example.py": ("baseline\n", "candidate\n")}
+    )
+
+    def replace_with_directory(phase, relative):
+        if phase == "before_replace" and relative == "CodeSmells/example.py":
+            (code_root / "example.py").unlink()
+            (code_root / "example.py").mkdir()
+
+    with pytest.raises(agent_workspace.AtomicApplyError) as failure:
+        agent_workspace.atomic_apply_workspace(state, hook=replace_with_directory)
+
+    assert failure.value.detail["rollback_status"] == "not_required"
+    assert (code_root / "example.py").is_dir()
+    assert not list(code_root.rglob("*.prepared-*"))
+    assert not list(code_root.rglob("*.backup-*"))
+
+
+def test_new_target_created_after_preflight_is_not_overwritten(isolated_project):
+    _project_root, code_root = isolated_project
+    state = _workspace_with_changes(code_root, {"new.py": (None, "candidate\n")})
+
+    def create_external_file(phase, _relative):
+        if phase == "after_preflight":
+            (code_root / "new.py").write_text("external\n", encoding="utf-8")
+
+    with pytest.raises(agent_workspace.AtomicApplyError):
+        agent_workspace.atomic_apply_workspace(state, hook=create_external_file)
+
+    assert (code_root / "new.py").read_text(encoding="utf-8") == "external\n"
+
+
+def test_existing_target_deleted_after_preflight_is_not_recreated(isolated_project):
+    _project_root, code_root = isolated_project
+    state = _workspace_with_changes(
+        code_root, {"example.py": ("baseline\n", "candidate\n")}
+    )
+
+    def delete_external_file(phase, _relative):
+        if phase == "after_preflight":
+            (code_root / "example.py").unlink()
+
+    with pytest.raises(agent_workspace.AtomicApplyError):
+        agent_workspace.atomic_apply_workspace(state, hook=delete_external_file)
+
+    assert not (code_root / "example.py").exists()
 
 
 def test_workspace_change_after_diff_approval_is_rejected(isolated_project):
@@ -417,3 +654,107 @@ def test_windows_replace_uses_closed_same_directory_temporary_files(
     assert (code_root / "example.py").read_text(encoding="utf-8") == "windows-new\n"
     assert not list(code_root.glob(".example.py.prepared-*"))
     assert not list(code_root.glob(".example.py.backup-*"))
+
+
+def test_same_source_root_apply_commit_sections_never_overlap(isolated_project):
+    _project_root, code_root = isolated_project
+    first_state = _workspace_with_changes(
+        code_root, {"example.py": ("baseline\n", "first\n")}
+    )
+    second_state = _workspace_with_changes(
+        code_root, {"example.py": ("baseline\n", "second\n")}
+    )
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    second_started = threading.Event()
+    second_entered = threading.Event()
+    failures = []
+
+    def first_hook(phase, _relative):
+        if phase == "before_commit":
+            first_entered.set()
+            release_first.wait()
+
+    def second_hook(phase, _relative):
+        if phase == "before_commit":
+            second_entered.set()
+
+    def apply_first():
+        agent_workspace.atomic_apply_workspace(first_state, hook=first_hook)
+
+    def apply_second():
+        second_started.set()
+        try:
+            agent_workspace.atomic_apply_workspace(second_state, hook=second_hook)
+        except Exception as exc:
+            failures.append(exc)
+
+    first_thread = threading.Thread(target=apply_first)
+    second_thread = threading.Thread(target=apply_second)
+    first_thread.start()
+    assert first_entered.wait(timeout=1)
+    second_thread.start()
+    assert second_started.wait(timeout=1)
+    assert not second_entered.is_set()
+
+    release_first.set()
+    first_thread.join(timeout=1)
+    second_thread.join(timeout=1)
+
+    assert not first_thread.is_alive()
+    assert not second_thread.is_alive()
+    assert len(failures) == 1
+    assert isinstance(failures[0], agent_workspace.BaselineConflictError)
+    assert (code_root / "example.py").read_text(encoding="utf-8") == "first\n"
+    assert not agent_workspace._APPLY_LOCKS
+
+
+def test_different_source_root_locks_can_progress_concurrently(tmp_path):
+    first_root = tmp_path / "first" / "CodeSmells"
+    second_root = tmp_path / "second" / "CodeSmells"
+    first_root.mkdir(parents=True)
+    second_root.mkdir(parents=True)
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    second_entered = threading.Event()
+
+    def hold_first_root():
+        with agent_workspace._apply_critical_section(first_root):
+            first_entered.set()
+            release_first.wait()
+
+    def enter_second_root():
+        with agent_workspace._apply_critical_section(second_root):
+            second_entered.set()
+
+    first_thread = threading.Thread(target=hold_first_root)
+    second_thread = threading.Thread(target=enter_second_root)
+    first_thread.start()
+    assert first_entered.wait(timeout=1)
+    second_thread.start()
+
+    assert second_entered.wait(timeout=1)
+    release_first.set()
+    first_thread.join(timeout=1)
+    second_thread.join(timeout=1)
+    assert not agent_workspace._APPLY_LOCKS
+
+
+def test_reparse_point_target_is_rejected_before_any_write(
+    isolated_project, monkeypatch
+):
+    _project_root, code_root = isolated_project
+    state = _workspace_with_changes(
+        code_root, {"example.py": ("baseline\n", "candidate\n")}
+    )
+    target = code_root / "example.py"
+    monkeypatch.setattr(
+        agent_workspace,
+        "_is_reparse_point",
+        lambda path: path == target,
+    )
+
+    with pytest.raises(agent_workspace.WorkspaceError, match="reparse point"):
+        agent_workspace.atomic_apply_workspace(state)
+
+    assert target.read_text(encoding="utf-8") == "baseline\n"

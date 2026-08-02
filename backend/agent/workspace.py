@@ -5,11 +5,15 @@ import json
 import os
 import re
 import shutil
+import stat
 import tempfile
+import threading
 import uuid
 from collections.abc import Iterable
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, Literal, TypedDict
+from typing import Any, Callable, Iterator, Literal, TypedDict
 
 from langgraph.errors import GraphInterrupt
 from langgraph.types import interrupt
@@ -51,13 +55,77 @@ class WorkspaceError(RuntimeError):
 class BaselineConflictError(WorkspaceError):
     """真实文件已偏离 run 启动时的基线，禁止静默覆盖。"""
 
+    def __init__(self, relative: str, *, phase: str, reason: str):
+        super().__init__(f"基线冲突: `{relative}` 在{phase}阶段发生{reason}，拒绝覆盖")
+        self.detail = {
+            "code": "baseline_conflict",
+            "phase": phase,
+            "conflicts": [relative],
+            "rollback_status": "not_required",
+            "recovery_artifacts": [],
+        }
+
 
 class AtomicApplyError(WorkspaceError):
     """原子应用失败，并携带补偿事务是否完整完成。"""
 
-    def __init__(self, message: str, *, rolled_back: bool):
+    def __init__(
+        self,
+        message: str,
+        *,
+        rolled_back: bool,
+        rollback_status: Literal["complete", "partial", "not_required"] | None = None,
+        conflicts: list[str] | None = None,
+        recovery_artifacts: list[str] | None = None,
+    ):
         super().__init__(message)
         self.rolled_back = rolled_back
+        self.detail = {
+            "code": "atomic_apply_failed",
+            "phase": "rollback" if rollback_status == "partial" else "commit",
+            "conflicts": conflicts or [],
+            "rollback_status": rollback_status
+            or ("complete" if rolled_back else "not_required"),
+            "recovery_artifacts": recovery_artifacts or [],
+        }
+
+
+@dataclass(frozen=True)
+class _TargetState:
+    kind: Literal["missing", "file", "directory", "special"]
+    sha256: str | None = None
+
+
+@dataclass
+class _ApplyLockEntry:
+    lock: threading.Lock
+    references: int = 0
+
+
+_APPLY_LOCKS_GUARD = threading.Lock()
+_APPLY_LOCKS: dict[str, _ApplyLockEntry] = {}
+
+
+@contextmanager
+def _apply_critical_section(source_root: Path) -> Iterator[None]:
+    """按规范源码根目录串行 apply，并在最后一个等待者退出时清退锁对象。"""
+
+    key = os.path.normcase(str(source_root.resolve(strict=False)))
+    with _APPLY_LOCKS_GUARD:
+        entry = _APPLY_LOCKS.get(key)
+        if entry is None:
+            entry = _ApplyLockEntry(lock=threading.Lock())
+            _APPLY_LOCKS[key] = entry
+        entry.references += 1
+    entry.lock.acquire()
+    try:
+        yield
+    finally:
+        entry.lock.release()
+        with _APPLY_LOCKS_GUARD:
+            entry.references -= 1
+            if entry.references == 0 and _APPLY_LOCKS.get(key) is entry:
+                _APPLY_LOCKS.pop(key, None)
 
 
 def _sha256_bytes(content: bytes) -> str:
@@ -290,6 +358,7 @@ def create_run_workspace() -> dict[str, Any]:
         "workspace_rolled_back": False,
         "workspace_cleaned": False,
         "workspace_error": None,
+        "workspace_apply_failure": None,
     }
 
 
@@ -406,8 +475,114 @@ def route_workspace_preparation(state: State) -> str:
     return "cleanup_workspace" if state.get("workspace_error") else "apply_workspace"
 
 
-def _current_hash(path: Path) -> str | None:
-    return _sha256_bytes(path.read_bytes()) if path.is_file() else None
+def _is_reparse_point(path: Path) -> bool:
+    try:
+        attributes = getattr(path.lstat(), "st_file_attributes", 0)
+    except FileNotFoundError:
+        return False
+    return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
+
+
+def _apply_target(relative: str) -> Path:
+    """复用快照/路径策略并保留词法路径，以便检测而不是跟随 reparse point。"""
+
+    normalized = _normalize_snapshot_path(relative)
+    canonical = _canonical_relative_path(normalized).as_posix()
+    if canonical.casefold() != normalized.casefold():
+        raise WorkspaceError(f"应用目标规范化后身份发生变化: `{relative}`")
+    target = PROJECT_ROOT / Path(*PurePosixPath(normalized).parts)
+    root_identity = os.path.normcase(os.path.abspath(REFACTOR_ROOT))
+    target_identity = os.path.normcase(os.path.abspath(target))
+    try:
+        common = os.path.commonpath([root_identity, target_identity])
+    except ValueError as exc:
+        raise WorkspaceError("应用目标与 CodeSmells 不在同一文件系统") from exc
+    if common != root_identity:
+        raise WorkspaceError("应用目标越出 CodeSmells")
+    return target
+
+
+def _assert_no_reparse_components(target: Path) -> None:
+    root = Path(os.path.abspath(REFACTOR_ROOT))
+    candidate = Path(os.path.abspath(target))
+    try:
+        relative_parts = candidate.relative_to(root).parts
+    except ValueError as exc:
+        raise WorkspaceError("应用目标越出 CodeSmells") from exc
+    current = root
+    for part in relative_parts:
+        current /= part
+        if not os.path.lexists(current):
+            continue
+        if (
+            current.is_symlink()
+            or getattr(current, "is_junction", lambda: False)()
+            or _is_reparse_point(current)
+        ):
+            raise WorkspaceError(
+                f"应用路径包含符号链接或 reparse point: `{target.name}`"
+            )
+
+
+def _inspect_target_state(target: Path) -> _TargetState:
+    _assert_no_reparse_components(target)
+    try:
+        metadata = target.lstat()
+    except FileNotFoundError:
+        return _TargetState("missing")
+    if stat.S_ISDIR(metadata.st_mode):
+        return _TargetState("directory")
+    if not stat.S_ISREG(metadata.st_mode):
+        return _TargetState("special")
+    try:
+        return _TargetState("file", _sha256_bytes(target.read_bytes()))
+    except (FileNotFoundError, IsADirectoryError, PermissionError) as exc:
+        raise BaselineConflictError(
+            target.name,
+            phase="状态读取",
+            reason=exc.__class__.__name__,
+        ) from exc
+
+
+def _expected_baseline_state(expected_hash: str | None) -> _TargetState:
+    return (
+        _TargetState("file", expected_hash)
+        if expected_hash is not None
+        else _TargetState("missing")
+    )
+
+
+def _assert_target_matches_baseline(
+    relative: str,
+    target: Path,
+    expected: _TargetState,
+    *,
+    phase: str,
+) -> None:
+    observed = _inspect_target_state(target)
+    if observed != expected:
+        reason = (
+            f"路径类型变化（{observed.kind}）"
+            if observed.kind not in {"file", "missing"}
+            else "外部内容变化"
+        )
+        raise BaselineConflictError(relative, phase=phase, reason=reason)
+
+
+def _call_apply_hook(
+    hook: Callable[[str, str | None], None] | None,
+    phase: str,
+    relative: str | None = None,
+) -> None:
+    if hook is not None:
+        hook(phase, relative)
+
+
+def _display_recovery_path(path: Path) -> str:
+    try:
+        return path.relative_to(PROJECT_ROOT).as_posix()
+    except ValueError:
+        return path.name
 
 
 def _ensure_parent_directory(path: Path, created_dirs: list[Path]) -> None:
@@ -439,14 +614,27 @@ def _write_same_directory_temp(target: Path, content: bytes, marker: str) -> Pat
     return Path(temp_name)
 
 
-def atomic_apply_workspace(state: State) -> None:
-    """以 prepare/commit/compensate 三段式事务应用全部文件。
+def atomic_apply_workspace(
+    state: State,
+    *,
+    hook: Callable[[str, str | None], None] | None = None,
+) -> None:
+    """以进程内串行化、乐观重检和安全补偿提供多文件事务语义。
 
-    文件系统没有跨文件原生事务，因此先在每个目标的同目录准备新文件与备份，
-    再用 Windows/POSIX 都支持的 ``os.replace`` 提交。任一步失败会逆序执行补偿，
-    这对应 Saga 的 compensation，但在本地临界区内对外提供“全有或全无”语义。
+    单文件提交使用同目录 ``os.replace``；多文件不是文件系统级原子事务。进程内锁
+    防止本服务的 apply 交错，外部编辑器则由每文件替换前的哈希重检检测。补偿前还会
+    确认目标仍是本事务写入的状态，绝不以旧备份覆盖第三方的新修改。
     """
 
+    with _apply_critical_section(REFACTOR_ROOT):
+        _atomic_apply_workspace_locked(state, hook=hook)
+
+
+def _atomic_apply_workspace_locked(
+    state: State,
+    *,
+    hook: Callable[[str, str | None], None] | None,
+) -> None:
     workspace_id = state.get("workspace_id")
     if not workspace_id:
         raise WorkspaceError("运行缺少隔离工作区")
@@ -470,6 +658,21 @@ def atomic_apply_workspace(state: State) -> None:
         raise WorkspaceError("当前工作区已偏离 Reviewer 成功测试快照，拒绝应用")
     if current_snapshot["digest"] != state.get("final_workspace_snapshot_digest", ""):
         raise WorkspaceError("审批后的完整工作区快照已改变，拒绝应用")
+
+    recorded_hashes = state.get("baseline_file_hashes", {})
+    current_source_hashes = _hash_snapshot(PROJECT_ROOT)
+    if current_source_hashes != recorded_hashes:
+        baseline_conflicts = sorted(
+            relative
+            for relative in set(current_source_hashes) | set(recorded_hashes)
+            if current_source_hashes.get(relative) != recorded_hashes.get(relative)
+        )
+        raise BaselineConflictError(
+            baseline_conflicts[0] if baseline_conflicts else "CodeSmells",
+            phase="全量预检",
+            reason="真实源码树偏离 run 基线",
+        )
+
     changed = [
         relative
         for relative in sorted(set(baseline_files) | set(final_files))
@@ -480,57 +683,108 @@ def atomic_apply_workspace(state: State) -> None:
         )
         != (final_files[relative].read_bytes() if relative in final_files else None)
     ]
-    recorded_hashes = state.get("baseline_file_hashes", {})
+    identities: set[str] = set()
+    targets: dict[str, Path] = {}
+    expected_states: dict[str, _TargetState] = {}
     for relative in changed:
-        target = (PROJECT_ROOT / relative).resolve(strict=False)
-        if not target.is_relative_to(REFACTOR_ROOT):
-            raise WorkspaceError("原子应用目标越出 CodeSmells")
-        expected_hash = recorded_hashes.get(relative)
-        if _current_hash(target) != expected_hash:
-            raise BaselineConflictError(
-                f"基线冲突: `{relative}` 已被外部修改，拒绝覆盖"
-            )
+        identity = _normalize_snapshot_path(relative).casefold()
+        if identity in identities:
+            raise WorkspaceError(f"应用目标包含大小写冲突路径: `{relative}`")
+        identities.add(identity)
+        target = _apply_target(relative)
+        targets[relative] = target
+        expected_states[relative] = _expected_baseline_state(
+            recorded_hashes.get(relative)
+        )
+        _assert_target_matches_baseline(
+            relative,
+            target,
+            expected_states[relative],
+            phase="预检",
+        )
 
+    _call_apply_hook(hook, "after_preflight")
     prepared: dict[str, Path] = {}
     backups: dict[str, Path] = {}
     created_dirs: list[Path] = []
     applied: list[str] = []
+    written_states: dict[str, _TargetState] = {}
+    preserved_temps: set[Path] = set()
+    transaction_id = uuid.uuid4().hex
     try:
-        # Prepare 阶段不触碰目标文件内容；全部临时文件关闭后才进入 replace，
-        # 避免 Windows 上仍被打开的 NamedTemporaryFile 导致 PermissionError。
+        # prepare 只创建同目录、已 fsync 且已关闭的临时文件，不改变目标内容。
         for relative in changed:
-            target = (PROJECT_ROOT / relative).resolve(strict=False)
+            target = targets[relative]
+            _assert_no_reparse_components(target)
             _ensure_parent_directory(target, created_dirs)
+            _assert_no_reparse_components(target)
             if relative in final_files:
                 prepared[relative] = _write_same_directory_temp(
                     target, final_files[relative].read_bytes(), "prepared"
                 )
-            if target.exists():
+            if expected_states[relative].kind == "file":
                 backups[relative] = _write_same_directory_temp(
                     target, target.read_bytes(), "backup"
                 )
 
+        _call_apply_hook(hook, "before_commit")
         for relative in changed:
-            target = (PROJECT_ROOT / relative).resolve(strict=False)
+            target = targets[relative]
+            _call_apply_hook(hook, "before_replace", relative)
+            _assert_target_matches_baseline(
+                relative,
+                target,
+                expected_states[relative],
+                phase="替换前",
+            )
             if relative in final_files:
+                final_bytes = final_files[relative].read_bytes()
                 os.replace(prepared[relative], target)
+                written_states[relative] = _TargetState(
+                    "file", _sha256_bytes(final_bytes)
+                )
             else:
                 os.replace(target, backups[relative])
+                written_states[relative] = _TargetState("missing")
             applied.append(relative)
+            _call_apply_hook(hook, "after_replace", relative)
     except Exception as apply_error:
         rollback_errors: list[str] = []
+        conflicts: list[str] = (
+            list(apply_error.detail["conflicts"])
+            if isinstance(apply_error, BaselineConflictError)
+            else []
+        )
+        recovery_artifacts: list[str] = []
         for relative in reversed(applied):
-            target = (PROJECT_ROOT / relative).resolve(strict=False)
+            target = targets[relative]
+            backup = backups.get(relative)
             try:
-                backup = backups.get(relative)
+                _call_apply_hook(hook, "before_rollback", relative)
+                if _inspect_target_state(target) != written_states[relative]:
+                    if relative not in conflicts:
+                        conflicts.append(relative)
+                    rollback_errors.append(f"{relative}:third_party_change")
+                    if backup and backup.exists():
+                        recovery = backup.with_name(
+                            f".{target.name}.refactor-recovery-{transaction_id}"
+                        )
+                        backup.rename(recovery)
+                        preserved_temps.add(recovery)
+                        recovery_artifacts.append(_display_recovery_path(recovery))
+                    continue
                 if backup and backup.exists():
                     os.replace(backup, target)
                 else:
-                    target.unlink(missing_ok=True)
+                    target.unlink(missing_ok=False)
             except Exception as rollback_error:
                 rollback_errors.append(
-                    f"{relative}: {rollback_error.__class__.__name__}"
+                    f"{relative}:{rollback_error.__class__.__name__}"
                 )
+                if backup and backup.exists():
+                    preserved_temps.add(backup)
+                    recovery_artifacts.append(_display_recovery_path(backup))
+
         for directory in reversed(created_dirs):
             try:
                 directory.rmdir()
@@ -538,16 +792,22 @@ def atomic_apply_workspace(state: State) -> None:
                 pass
         if rollback_errors:
             raise AtomicApplyError(
-                "原子应用失败，且补偿回滚不完整: " + "；".join(rollback_errors),
+                "多文件应用失败，且部分目标无法安全补偿，需要人工处理",
                 rolled_back=False,
+                rollback_status="partial",
+                conflicts=conflicts,
+                recovery_artifacts=recovery_artifacts,
             ) from apply_error
         raise AtomicApplyError(
-            f"原子应用失败，已完整回滚: {apply_error}",
+            "多文件应用失败，已完成安全补偿回滚 " f"({apply_error.__class__.__name__})",
             rolled_back=bool(applied),
+            rollback_status="complete" if applied else "not_required",
+            conflicts=conflicts,
         ) from apply_error
     finally:
         for temp_path in [*prepared.values(), *backups.values()]:
-            temp_path.unlink(missing_ok=True)
+            if temp_path not in preserved_temps:
+                temp_path.unlink(missing_ok=True)
 
 
 def cleanup_run_workspace(workspace_id: str) -> None:
@@ -602,6 +862,7 @@ def apply_workspace_changes_node(state: State) -> dict[str, Any]:
                 "workspace_applied": False,
                 "workspace_rolled_back": False,
                 "workspace_error": "用户拒绝最终聚合 diff",
+                "workspace_apply_failure": None,
             }
 
         atomic_apply_workspace(state)
@@ -623,6 +884,7 @@ def apply_workspace_changes_node(state: State) -> dict[str, Any]:
             "workspace_applied": True,
             "workspace_rolled_back": False,
             "workspace_error": cleanup.get("workspace_error"),
+            "workspace_apply_failure": None,
         }
     except GraphInterrupt:
         raise
@@ -637,6 +899,11 @@ def apply_workspace_changes_node(state: State) -> dict[str, Any]:
                 exc.rolled_back if isinstance(exc, AtomicApplyError) else False
             ),
             "workspace_error": str(exc),
+            "workspace_apply_failure": (
+                exc.detail
+                if isinstance(exc, (AtomicApplyError, BaselineConflictError))
+                else None
+            ),
         }
 
 

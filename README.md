@@ -1,6 +1,6 @@
 # Refactor-Agent
 
-Refactor-Agent 是一个面向 Python 历史代码的多智能体重构工作台。它不是“让模型直接改文件”的演示：Architect 先生成可校验任务 DAG，Developer 在 run 级隔离副本中逐任务修改，Reviewer 只能执行测试并依据结构化证据裁决，最终聚合 diff 经一次人工审批后才会原子应用到 `CodeSmells/`。
+Refactor-Agent 是一个面向 Python 历史代码的多智能体重构工作台。它不是“让模型直接改文件”的演示：Architect 先生成可校验任务 DAG，Developer 在 run 级隔离副本中逐任务修改，Reviewer 只能执行测试并依据结构化证据裁决，最终聚合 diff 经一次人工审批后才会受控应用到 `CodeSmells/`。
 
 项目重点展示 LangGraph 状态机、动态 DAG 调度、最小权限工具、HITL、双通道实时通信、隔离工作区、安全边界、离线 Agent Eval 与 Windows CI。
 
@@ -14,7 +14,7 @@ Refactor-Agent 是一个面向 Python 历史代码的多智能体重构工作台
 - run 级 `baseline/working` 双快照；Agent 全程不直接修改用户源码。
 - Reviewer 成功必须同时满足写入记录、完整工作区快照绑定、测试前后源码不变、可信行为契约、退出码与成功协议。
 - 可信行为契约位于 Agent 不可写的 `backend/behavior_tests/`；Reviewer 以固定测试代码验证当前 run 的隔离 `working/CodeSmells`，计划、写工具与最终应用都会拒绝触碰测试边界。
-- 最终完整聚合 diff 只审批一次；批准时执行基线冲突检测、原子替换与补偿回滚。
+- 最终完整聚合 diff 只审批一次；批准时执行进程内 apply 串行化、替换前冲突重检、单文件原子替换与安全补偿回滚。
 - SSE 传输版本化结构事件，WebSocket 承载 A2A 消息与低延迟审批通知。
 - Redis 不可用时降级为 `MemorySaver`，Neo4j 不可用时降级为内存 AST 调用图。
 - 前端 Markdown 统一经过 DOMPurify allowlist，模型 URL 经过 SSRF 防护。
@@ -46,7 +46,7 @@ flowchart LR
         Developer["Developer<br/>逐任务写 working 副本"]
         Reviewer["Reviewer<br/>仅运行测试"]
         Approval["最终聚合 HITL"]
-        Apply["冲突检测 + 原子应用"]
+        Apply["并发重检 + 受控应用"]
         Architect --> Scheduler --> Developer
         Developer -->|"下一 ready task"| Scheduler
         Scheduler -->|"全部任务完成"| Reviewer
@@ -108,7 +108,7 @@ stateDiagram-v2
     Reviewer --> PrepareApproval: REFACTOR_SUCCESS + 结构化证据通过
     PrepareApproval --> ApplyWorkspace: 用户批准
     PrepareApproval --> Cleanup: 用户拒绝或 diff 无效
-    ApplyWorkspace --> [*]: 原子应用成功
+    ApplyWorkspace --> [*]: 受控应用成功
     Reviewer --> Cleanup: 重试耗尽或证据失败
     ScheduleTask --> Cleanup: 预算耗尽或依赖阻断
     Cleanup --> [*]
@@ -313,13 +313,13 @@ LangGraph 会把 `configurable` 中的标量复制到 checkpoint metadata。直�
 
 日志是给人读的，措辞、语言和模型输出都可能变化；用正则从日志推断任务状态会产生不可审计的隐式协议。版本化结构事件显式携带 `type`、`run_id`、`task_id`、状态、用量和 payload，前端 reducer、测试与 Eval 可以共享同一契约。代价是事件 schema 需要兼容性管理，但这正是可靠控制面应承担的成本。
 
-五项决策的完整背景与后果记录在 [ADR 目录](docs/adr/)。
+各项决策的完整背景与后果记录在 [ADR 目录](docs/adr/)。
 
 ## 已知限制
 
 - 动态 DAG 当前采用确定性串行拓扑调度，不会并行运行多个任务。
 - 隔离工作区是应用级文件边界，不是容器、虚拟机或操作系统级恶意代码沙箱。
-- 多文件应用依赖逐文件 `os.replace` 与补偿回滚；可处理进程内异常，但不等价于支持掉电恢复的文件系统事务。
+- 多文件应用依赖逐文件 `os.replace`、乐观并发重检与补偿回滚；它不是文件系统级原子事务，也不能完全消除不遵守进程内锁的外部编辑器竞态。
 - 未配置 Redis 时 checkpoint 只在当前进程有效；进程内会话令牌和临时 API Key 也不会跨重启恢复。
 - AST 调用图主要覆盖静态 Python 语法，反射、动态导入和运行时猴子补丁可能无法建模。
 - Developer 的 run 级符号查询选择按需解析 working tree，优先保证隔离与新鲜度；代价是大型源码树的单次查询延迟高于共享缓存。

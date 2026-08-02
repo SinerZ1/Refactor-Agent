@@ -243,6 +243,9 @@ class State(TypedDict):
     workspace_rolled_back: NotRequired[bool]
     workspace_cleaned: NotRequired[bool]
     workspace_error: NotRequired[str | None]
+    # 前端仍消费 workspace_error；结构化对象供控制面区分普通冲突、完整补偿和需要
+    # 人工介入的部分回滚，不把源码或备份内容写入 checkpoint。
+    workspace_apply_failure: NotRequired[dict[str, Any] | None]
 
 
 def get_message_text(content: Any) -> str:

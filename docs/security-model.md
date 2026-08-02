@@ -56,7 +56,7 @@ Reviewer 通过受控变更清单、摘要、测试上下文和工具证据完�
 4. 实际读写被重定向到当前 run 的 `working` 快照；
 5. 工作区 ID 必须匹配内部生成格式，清理操作再次验证目标属于 `.refactor-workspaces/`。
 
-最终应用前比较真实源码与 baseline 哈希，避免长时间 Agent 运行或审批期间覆盖用户的新改动。working 和审批 diff 的哈希也会复核，避免“批准 A、应用 B”。
+最终应用按源码根目录串行化，并在全量预检后、每个文件替换前再次比较真实状态与 baseline，避免长时间 Agent 运行、审批期间或提交阶段覆盖用户的新改动。working 和审批 diff 的哈希也会复核，避免“批准 A、应用 B”。补偿回滚仅在目标仍等于本事务写入摘要时恢复旧版本；第三方再次修改时失败关闭并保留最小恢复材料。
 
 Architect 的全局 AST/Neo4j 只描述用户原始源码。Developer 查询通过注入的 `workspace_id` 对当前 working tree 按需构建私有 AST 快照，不切换进程级全局变量、不把临时源码写入 Neo4j；因此两个并发 run 无法通过索引缓存互相看到候选符号。
 
@@ -166,14 +166,14 @@ Agent 消息和 WebSocket 聊天都使用统一 `renderSafeMarkdown()`：
 | Markdown XSS | DOMPurify allowlist | `markdown.spec.ts` |
 | 过期审批重放 | run lease、一次性 approval nonce | `test_session_registry.py` |
 | 批准内容被替换 | baseline/working/final 哈希复核 | `test_isolated_workspace.py` |
-| 多文件部分应用 | 同目录临时文件、`os.replace`、补偿回滚 | `test_isolated_workspace.py` |
+| 多文件部分应用与 TOCTOU | 分根锁、替换前重检、同目录 `os.replace`、写入摘要绑定的安全补偿 | `test_isolated_workspace.py` |
 | 可选服务故障导致绕过 | 显式 MemorySaver/AST 降级并保留门禁 | `test_app_transport.py`、`test_backend_contracts.py` |
 
 ## 13. 非目标与剩余风险
 
 - 应用级隔离工作区不是恶意 Python 的 OS 沙箱；测试仍在本机受控 Python 进程中运行。
 - AST 索引不是完整语义分析器。
-- 补偿回滚不能保证机器掉电场景的跨文件事务恢复。
+- 多文件补偿不是文件系统级原子事务，不能保证机器掉电恢复；不遵守进程内锁的外部编辑器仍可在最后一次哈希检查与替换之间竞态。
 - 进程内会话和凭据库不适合未经改造的多副本部署。
 - 人工批准可以降低误改风险，但不能证明业务语义正确。
 - 生产部署仍应增加 TLS、反向代理认证、网络出口策略、进程权限隔离和审计存储。

@@ -19,7 +19,7 @@
 | LangGraph | 角色节点、工具循环、条件路由、checkpoint 与中断恢复 | `backend/agent/workflow.py` |
 | 计划校验 | 规范化任务 ID、路径、依赖与无环性 | `backend/agent/plans.py` |
 | DAG 调度器 | ready task 选择、任务状态、重试、下游重开与阻断 | `backend/agent/scheduler.py` |
-| 隔离工作区 | 双快照、聚合 diff、哈希固化、原子应用和清理 | `backend/agent/workspace.py` |
+| 隔离工作区 | 双快照、聚合 diff、哈希固化、并发受控应用和清理 | `backend/agent/workspace.py` |
 | 工具边界 | 文件路径授权、固定测试 argv、角色工具集合 | `backend/agent/tools.py` |
 | 事件协议 | 版本化 `run.*`、`plan.*`、`task.*`、`tool.*`、`approval.*` | `backend/agent/events.py` |
 | 会话注册表 | 后端签发令牌、单 run lease、一次性审批 nonce | `backend/session_registry.py` |
@@ -154,9 +154,9 @@ Reviewer 没有文件读取或写入工具，唯一工具是 `run_unit_tests`。
 - working 快照仍与 Reviewer 成功测试及最终审批绑定的摘要一致；
 - 用户真实 `CodeSmells/` 仍与 run 开始时的 baseline 哈希一致。
 
-应用阶段先在每个目标同目录创建并关闭临时文件，随后用 `os.replace` 替换。已有文件会先移动到备份；任一步失败时按逆序执行补偿。拒绝、预算失败、测试失败、断连和异常终态都会清理 run 工作区，并保持用户源码不变。
+应用阶段按规范化源码根目录取得进程内锁，在每个目标同目录创建、fsync 并关闭临时文件；提交时每个文件都在 `os.replace` 前立即重检真实状态。已有文件保留同目录备份，任一步失败时按逆序补偿；补偿前再次确认目标仍是本事务刚写入的摘要，若第三方已再次修改则不覆盖，并保留明确命名的最小恢复材料。拒绝、预算失败、测试失败、断连和普通异常终态都会清理 run 工作区。
 
-这提供应用级事务语义，但不是支持机器掉电恢复的文件系统事务；相关边界见 [ADR-0005](adr/0005-isolated-workspace-atomic-apply.md)。
+单文件替换具有同目录原子替换语义；多文件只通过乐观并发控制与补偿回滚提供应用级事务语义，不是文件系统或数据库的真正多文件原子事务。进程内锁不能约束普通编辑器或其他进程，替换前重检仍存在无法完全消除的极小竞态窗口。相关边界见 [ADR-0007](adr/0007-optimistic-concurrent-apply.md)。
 
 ## 7. SSE 与 WebSocket
 
