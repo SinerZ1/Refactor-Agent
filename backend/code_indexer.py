@@ -1,4 +1,5 @@
 import ast
+from collections.abc import Mapping
 from pathlib import Path
 from threading import RLock
 from typing import TypedDict
@@ -14,6 +15,13 @@ class SymbolRecord(TypedDict):
     type: str
     file_path: str
     code: str
+
+
+class SymbolIndexSnapshot(TypedDict):
+    """一次目录解析的不可变语义快照，不写入进程级全局状态。"""
+
+    symbols: dict[str, SymbolRecord]
+    parse_errors: list[str]
 
 
 # 索引使用稳定 symbol_id 作为主键，避免不同类或文件中的同名方法互相覆盖。
@@ -37,15 +45,10 @@ def resolve_source_directory(directory_path: str | Path = "CodeSmells") -> Path:
 
 
 def display_file_path(file_path: Path, source_root: Path) -> str:
-    """优先返回项目相对路径，临时测试目录则相对其源码根目录展示。"""
+    """隐藏物理工作区位置，只暴露稳定的源码根相对路径。"""
 
     resolved_file = file_path.resolve()
-    try:
-        return resolved_file.relative_to(PROJECT_ROOT).as_posix()
-    except ValueError:
-        return (
-            Path(source_root.name) / resolved_file.relative_to(source_root)
-        ).as_posix()
+    return (Path(source_root.name) / resolved_file.relative_to(source_root)).as_posix()
 
 
 def symbol_identity(file_path: Path, source_root: Path, qualname: str) -> str:
@@ -101,25 +104,38 @@ def scan_python_file(file_path: Path, source_root: Path) -> list[SymbolRecord]:
     return visitor.symbols
 
 
-def index_directory(directory_path: str | Path = "CodeSmells") -> int:
-    """重建目录符号索引，并原子替换内存快照。"""
+def build_symbol_index(
+    directory_path: str | Path = "CodeSmells",
+) -> SymbolIndexSnapshot:
+    """按需解析一个源码根，返回调用方私有索引而不触碰全局状态。"""
 
     source_root = resolve_source_directory(directory_path)
     if not source_root.is_dir():
-        return 0
+        return {"symbols": {}, "parse_errors": ["源码目录不存在"]}
 
     next_index: dict[str, SymbolRecord] = {}
-    for file_path in source_root.rglob("*.py"):
+    parse_errors: list[str] = []
+    for file_path in sorted(source_root.rglob("*.py")):
         try:
             for symbol in scan_python_file(file_path, source_root):
                 next_index[symbol["id"]] = symbol
         except (OSError, SyntaxError, UnicodeError) as exc:
-            print(f"[Indexer] 静态解析文件 {file_path} 异常: {exc}")
+            display_path = display_file_path(file_path, source_root)
+            parse_errors.append(f"{display_path}:{exc.__class__.__name__}")
+    return {"symbols": next_index, "parse_errors": parse_errors}
+
+
+def index_directory(directory_path: str | Path = "CodeSmells") -> int:
+    """重建原始源码全局索引，并原子替换内存快照。"""
+
+    snapshot = build_symbol_index(directory_path)
+    for parse_error in snapshot["parse_errors"]:
+        print(f"[Indexer] 静态解析异常: {parse_error}")
 
     with _INDEX_LOCK:
         SYMBOL_INDEX.clear()
-        SYMBOL_INDEX.update(next_index)
-    return len(next_index)
+        SYMBOL_INDEX.update(snapshot["symbols"])
+    return len(snapshot["symbols"])
 
 
 def index_file(file_path: str | Path, directory_path: str | Path = "CodeSmells") -> int:
@@ -143,22 +159,26 @@ def index_file(file_path: str | Path, directory_path: str | Path = "CodeSmells")
     return len(symbols)
 
 
-def get_symbol_definition_content(symbol_name: str) -> str:
-    """按 ID、qualified name 或裸名称检索；同名结果全部返回而不静默覆盖。"""
-
-    if not SYMBOL_INDEX:
-        index_directory()
+def render_symbol_definition_content(
+    symbol_name: str,
+    symbols: Mapping[str, SymbolRecord],
+    *,
+    parse_errors: list[str] | None = None,
+) -> str:
+    """从显式索引快照检索，便于 run 级依赖注入而非切换模块全局。"""
 
     query = symbol_name.strip()
-    with _INDEX_LOCK:
-        matches = [
-            symbol
-            for symbol in SYMBOL_INDEX.values()
-            if query in {symbol["id"], symbol["qualname"], symbol["name"]}
-        ]
+    matches = [
+        symbol
+        for symbol in symbols.values()
+        if query in {symbol["id"], symbol["qualname"], symbol["name"]}
+    ]
 
     if not matches:
-        return f"未能在本地项目的 AST 索引中检索到符号 `{query}` 的声明。"
+        result = f"未能在指定 AST 索引中检索到符号 `{query}` 的声明。"
+        if parse_errors:
+            result += "\n[AST_PARSE_WARNINGS] " + "；".join(parse_errors[:10])
+        return result
 
     sections = []
     for symbol in sorted(matches, key=lambda item: item["id"]):
@@ -175,4 +195,43 @@ def get_symbol_definition_content(symbol_name: str) -> str:
                 ]
             )
         )
+    if parse_errors:
+        sections.append("[AST_PARSE_WARNINGS] " + "；".join(parse_errors[:10]))
     return "\n\n".join(sections)
+
+
+def get_symbol_definition_content(symbol_name: str) -> str:
+    """查询用户原始源码索引；该全局快照永不指向临时 run 工作区。"""
+
+    if not SYMBOL_INDEX:
+        index_directory()
+    with _INDEX_LOCK:
+        snapshot = dict(SYMBOL_INDEX)
+    return render_symbol_definition_content(symbol_name, snapshot)
+
+
+def get_workspace_symbol_definition_content(
+    symbol_name: str,
+    source_root: str | Path,
+    *,
+    allowed_paths: set[str] | None = None,
+) -> tuple[str, SymbolIndexSnapshot]:
+    """查询时解析当前 working tree，天然反映写入、删除、重命名与语法错误。"""
+
+    snapshot = build_symbol_index(source_root)
+    symbols: Mapping[str, SymbolRecord] = snapshot["symbols"]
+    if allowed_paths is not None:
+        allowed_identities = {path.casefold() for path in allowed_paths}
+        symbols = {
+            symbol_id: symbol
+            for symbol_id, symbol in symbols.items()
+            if symbol["file_path"].casefold() in allowed_identities
+        }
+    return (
+        render_symbol_definition_content(
+            symbol_name,
+            symbols,
+            parse_errors=snapshot["parse_errors"],
+        ),
+        snapshot,
+    )

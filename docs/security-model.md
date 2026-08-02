@@ -52,11 +52,13 @@ Reviewer 通过受控变更清单、摘要、测试上下文和工具证据完�
 
 1. 规范化后仍位于 `CodeSmells/`；
 2. 拒绝绝对路径、盘符、`..` 和符号解析后的越界；
-3. 动态 DAG 模式下还必须等于当前任务的 `file_path`；
+3. 动态 DAG 模式下写入必须等于当前任务的 `file_path`，读取和符号查询仅覆盖当前任务及其已完成传递依赖；
 4. 实际读写被重定向到当前 run 的 `working` 快照；
 5. 工作区 ID 必须匹配内部生成格式，清理操作再次验证目标属于 `.refactor-workspaces/`。
 
 最终应用前比较真实源码与 baseline 哈希，避免长时间 Agent 运行或审批期间覆盖用户的新改动。working 和审批 diff 的哈希也会复核，避免“批准 A、应用 B”。
+
+Architect 的全局 AST/Neo4j 只描述用户原始源码。Developer 查询通过注入的 `workspace_id` 对当前 working tree 按需构建私有 AST 快照，不切换进程级全局变量、不把临时源码写入 Neo4j；因此两个并发 run 无法通过索引缓存互相看到候选符号。
 
 ## 5. 凭据边界
 

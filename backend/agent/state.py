@@ -93,6 +93,19 @@ class TaskTransition(TypedDict):
     blocked_task_ids: NotRequired[list[str]]
 
 
+class TaskDependencyResult(TypedDict):
+    """下游任务消费的权威上游结果；内容有界且绑定实际 working tree。"""
+
+    task_id: str
+    status: Literal["completed"]
+    modified_files: list[str]
+    change_summary: str
+    symbols: list[str]
+    workspace_snapshot_digest: str
+    content_sha256: str | None
+    syntax_status: Literal["valid", "invalid", "deleted"]
+
+
 def merge_change_records(
     existing: list[ChangeRecord], updates: list[ChangeRecord]
 ) -> list[ChangeRecord]:
@@ -208,6 +221,7 @@ class State(TypedDict):
     completed_task_ids: NotRequired[list[str]]
     task_failures: NotRequired[dict[str, TaskFailure]]
     task_retry_counts: NotRequired[dict[str, int]]
+    task_results: NotRequired[dict[str, TaskDependencyResult]]
     plan_status: NotRequired[PlanExecutionStatus]
     active_task_write_succeeded: NotRequired[bool]
     active_task_failure_reason: NotRequired[str | None]

@@ -4,6 +4,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
 
 import agent.nodes as agent_nodes
+import agent.scheduler as agent_scheduler
 import agent.tools as agent_tools
 import agent.workspace as agent_workspace
 from agent.edges import route_task_scheduler
@@ -14,6 +15,27 @@ from agent.scheduler import (
     schedule_next_task_node,
 )
 from agent.state import State
+
+
+def _dependency_result(task_id):
+    return {
+        "task_id": task_id,
+        "status": "completed",
+        "modified_files": [f"CodeSmells/{task_id}.py"],
+        "change_summary": "modified",
+        "symbols": [task_id],
+        "workspace_snapshot_digest": f"snapshot-{task_id}",
+        "content_sha256": f"hash-{task_id}",
+        "syntax_status": "valid",
+    }
+
+
+@pytest.fixture(autouse=True)
+def deterministic_dependency_result(monkeypatch):
+    def build_result(_state, task_id):
+        return _dependency_result(task_id)
+
+    monkeypatch.setattr(agent_scheduler, "_build_task_dependency_result", build_result)
 
 
 def _task(task_id: str, file_path: str, dependencies: list[str] | None = None):
@@ -327,6 +349,10 @@ def test_reviewer_reopens_selected_task_and_transitive_downstream_only():
             "entrypoint": "completed",
         },
         completed_task_ids=["models", "service", "entrypoint"],
+        task_results={
+            task_id: _dependency_result(task_id)
+            for task_id in ["models", "service", "entrypoint"]
+        },
         plan_status="completed",
     )
 
@@ -338,6 +364,7 @@ def test_reviewer_reopens_selected_task_and_transitive_downstream_only():
         "entrypoint": "pending",
     }
     assert result["completed_task_ids"] == ["models"]
+    assert set(result["task_results"]) == {"models"}
     assert result["plan_status"] == "running"
 
 

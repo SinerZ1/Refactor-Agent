@@ -83,13 +83,16 @@ Architect 的计划必须包含版本、摘要和任务数组。每个任务包�
 - checkpoint 恢复只需要一个 `active_task_id`；
 - Reviewer 打回后的重开集合可确定复现。
 
-Developer 上下文包含当前任务、已完成依赖和唯一允许写入路径。即使模型忽略指令，`write_code_file` 仍会在工具层比较当前任务目标路径。
+Developer 上下文包含当前任务、唯一允许写入路径，以及从权威状态生成的有界 `DEPENDENCY_RESULTS` JSON。每个上游结果记录任务状态、实际修改文件、变更摘要、相关符号、文件内容哈希和当时的完整工作区摘要；不会把完整代码或无限 diff 注入 Prompt。Reviewer 打回时，指定任务及下游的旧结果一并移除，重试从当前 working tree 重新固化。
+
+源码查询显式区分作用域：Architect 的 `search_symbol_definition` 与 Neo4j 拓扑面向用户原始源码；Developer 的同名工具每次查询都按需解析当前 run 的 `working/CodeSmells`，并只返回当前任务及传递依赖文件中的符号。选择按需解析而非共享增量缓存，牺牲部分性能以换取写入、删除、重命名、语法错误和并发 run 下更容易证明的隔离正确性；临时工作区从不写入全局 AST 或 Neo4j。
 
 ### 4.3 失败、重试与阻断
 
 - 每个任务最多尝试 3 次。
 - Developer 未产生成功写入时记录结构化失败，再由调度器决定是否重试。
 - Reviewer 可返回 `failed_task_ids`；指定任务及其所有传递下游从完成态重开。
+- HITL 恢复和任务重试继续使用 checkpoint 中同一 `workspace_id`，符号查询不会退回用户原始源码。
 - 依赖失败且不存在 ready task 时，剩余任务进入 `blocked`，计划进入失败终态。
 - Agent 步数、工具调用、总 Token 或模型超时预算耗尽时，走预算失败节点并清理工作区。
 

@@ -55,6 +55,42 @@ def resolve_path(file_path: str) -> str:
     return str((PROJECT_ROOT / normalized).resolve(strict=False))
 
 
+def _authorized_task_paths(state: State) -> set[str] | None:
+    """返回动态任务可见的当前文件与传递依赖文件；fallback 保持兼容全读。"""
+
+    plan = state.get("refactor_plan")
+    active_task_id = state.get("active_task_id")
+    if plan is None or not active_task_id:
+        return None
+    tasks_by_id = {task["id"]: task for task in plan["tasks"]}
+    if active_task_id not in tasks_by_id:
+        return set()
+    visible_ids = {active_task_id}
+    pending = list(tasks_by_id[active_task_id]["dependencies"])
+    while pending:
+        task_id = pending.pop()
+        if task_id in visible_ids or task_id not in tasks_by_id:
+            continue
+        visible_ids.add(task_id)
+        pending.extend(tasks_by_id[task_id]["dependencies"])
+    return {tasks_by_id[task_id]["file_path"] for task_id in visible_ids}
+
+
+def _is_task_path_authorized(file_path: str, state: State) -> bool:
+    allowed_paths = _authorized_task_paths(state)
+    if allowed_paths is None:
+        return True
+    try:
+        normalized = canonical_refactor_path(
+            file_path,
+            project_root=PROJECT_ROOT,
+            refactor_root=REFACTOR_ROOT,
+        )
+    except PathPolicyError:
+        return False
+    return normalized.casefold() in {path.casefold() for path in allowed_paths}
+
+
 @tool(response_format="content_and_artifact")
 def read_code_file(
     file_path: str,
@@ -67,6 +103,15 @@ def read_code_file(
         workspace_id = state.get("workspace_id")
         if not workspace_id:
             raise ValueError("当前运行缺少隔离工作区")
+        if not _is_task_path_authorized(file_path, state):
+            return (
+                "读取文件失败: 当前动态任务无权访问该文件",
+                {
+                    "success": False,
+                    "file_path": file_path,
+                    "failure_kind": "task_path_violation",
+                },
+            )
         abs_path = str(resolve_workspace_path(workspace_id, file_path))
         if os.path.getsize(abs_path) > MAX_CODE_FILE_BYTES:
             return (
@@ -452,7 +497,46 @@ def search_symbol_definition(symbol_name: str) -> tuple[str, dict]:
     return get_symbol_definition_content(symbol_name), {
         "success": True,
         "symbol_name": symbol_name,
+        "source_scope": "original",
     }
+
+
+@tool("search_symbol_definition", response_format="content_and_artifact")
+def search_workspace_symbol_definition(
+    symbol_name: str,
+    state: Annotated[State, InjectedState],
+) -> tuple[str, dict]:
+    """从当前 run 的 working 快照按需解析符号，不读取或改写全局索引。"""
+
+    try:
+        workspace_id = state.get("workspace_id")
+        if not workspace_id:
+            raise ValueError("当前运行缺少隔离工作区")
+        source_root = resolve_workspace_path(workspace_id, "CodeSmells")
+        allowed_paths = _authorized_task_paths(state)
+        from code_indexer import get_workspace_symbol_definition_content
+
+        content, snapshot = get_workspace_symbol_definition_content(
+            symbol_name,
+            source_root,
+            allowed_paths=allowed_paths,
+        )
+        return content, {
+            "success": True,
+            "symbol_name": symbol_name,
+            "source_scope": "workspace",
+            "parse_error_count": len(snapshot["parse_errors"]),
+        }
+    except Exception as exc:
+        return (
+            f"查询当前工作区符号失败: {exc}",
+            {
+                "success": False,
+                "symbol_name": symbol_name,
+                "source_scope": "workspace",
+                "failure_kind": "workspace_symbol_query_error",
+            },
+        )
 
 
 @tool(response_format="content_and_artifact")
@@ -490,5 +574,5 @@ def query_neo4j_topology() -> tuple[str, dict]:
 
 # 区分不同智能体的工具集合
 architect_tools = [read_code_file, search_symbol_definition, query_neo4j_topology]
-developer_tools = [read_code_file, write_code_file, search_symbol_definition]
+developer_tools = [read_code_file, write_code_file, search_workspace_symbol_definition]
 reviewer_tools = [run_unit_tests]

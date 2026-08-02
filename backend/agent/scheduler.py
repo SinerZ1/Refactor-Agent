@@ -1,12 +1,16 @@
 import json
-from typing import Any
+from typing import Any, Literal
 
 from langchain_core.messages import HumanMessage
 
-from .plans import RefactorPlan
-from .state import State, TaskFailure, TaskTransition
+from .plans import RefactorPlan, RefactorTask
+from .state import State, TaskDependencyResult, TaskFailure, TaskTransition
 
 MAX_TASK_RETRIES = 3
+MAX_DEPENDENCY_CONTEXT_CHARS = 6_000
+MAX_DEPENDENCY_SUMMARY_CHARS = 800
+MAX_DEPENDENCY_FILES = 8
+MAX_DEPENDENCY_SYMBOLS = 16
 
 
 def initialize_plan_execution(
@@ -27,6 +31,7 @@ def initialize_plan_execution(
             "completed_task_ids": [],
             "task_failures": {},
             "task_retry_counts": {},
+            "task_results": {},
             "plan_status": "fallback",
             "active_task_write_succeeded": False,
             "active_task_failure_reason": plan_error,
@@ -38,6 +43,7 @@ def initialize_plan_execution(
         "completed_task_ids": [],
         "task_failures": {},
         "task_retry_counts": {task["id"]: 0 for task in plan["tasks"]},
+        "task_results": {},
         "plan_status": "pending",
         "active_task_write_succeeded": False,
         "active_task_failure_reason": None,
@@ -59,6 +65,149 @@ def _downstream_task_ids(plan: RefactorPlan, roots: set[str]) -> list[str]:
                 affected.add(task["id"])
                 changed = True
     return [task["id"] for task in plan["tasks"] if task["id"] in affected]
+
+
+def _build_task_dependency_result(
+    state: State,
+    task_id: str,
+) -> TaskDependencyResult:
+    """从 working tree 构造任务结果，不从 Developer 自述推断事实。"""
+
+    workspace_id = state.get("workspace_id")
+    plan = state.get("refactor_plan")
+    if not workspace_id or plan is None:
+        raise ValueError("无法为缺少工作区或计划的任务生成依赖结果")
+    task = next(task for task in plan["tasks"] if task["id"] == task_id)
+
+    from code_indexer import scan_python_file
+
+    from .workspace import (
+        build_workspace_snapshot,
+        resolve_workspace_path,
+        workspace_changed_paths,
+    )
+
+    snapshot = build_workspace_snapshot(workspace_id)
+    snapshot_file = next(
+        (item for item in snapshot["files"] if item["path"] == task["file_path"]),
+        None,
+    )
+    changed_files = workspace_changed_paths(workspace_id)
+    modified_files = [task["file_path"]] if task["file_path"] in changed_files else []
+    source_file = resolve_workspace_path(workspace_id, task["file_path"])
+    if snapshot_file is None or not source_file.is_file():
+        syntax_status: Literal["valid", "invalid", "deleted"] = "deleted"
+        symbols: list[str] = []
+        change_kind = "deleted"
+        content_sha256 = None
+        size_bytes = 0
+    else:
+        content_sha256 = snapshot_file["sha256"]
+        size_bytes = snapshot_file["size_bytes"]
+        change_kind = "modified" if modified_files else "unchanged"
+        try:
+            source_root = source_file.parent
+            while source_root.name.casefold() != "codesmells":
+                if source_root.parent == source_root:
+                    raise ValueError("任务文件不属于 CodeSmells")
+                source_root = source_root.parent
+            parsed = scan_python_file(source_file, source_root)
+            symbols = [symbol["qualname"] for symbol in parsed[:MAX_DEPENDENCY_SYMBOLS]]
+            syntax_status = "valid"
+        except (OSError, SyntaxError, UnicodeError, ValueError):
+            symbols = []
+            syntax_status = "invalid"
+
+    summary = (
+        f"{change_kind}; bytes={size_bytes}; "
+        f"sha256={content_sha256 or '<deleted>'}; syntax={syntax_status}"
+    )[:MAX_DEPENDENCY_SUMMARY_CHARS]
+    return {
+        "task_id": task_id,
+        "status": "completed",
+        "modified_files": modified_files[:MAX_DEPENDENCY_FILES],
+        "change_summary": summary,
+        "symbols": symbols,
+        "workspace_snapshot_digest": snapshot["digest"],
+        "content_sha256": content_sha256,
+        "syntax_status": syntax_status,
+    }
+
+
+def render_dependency_context(state: State, task: RefactorTask) -> str:
+    """把直接依赖结果序列化为有界 JSON，保留可机器解析的截断元数据。"""
+
+    results = state.get("task_results", {})
+    statuses = state.get("task_statuses", {})
+    selected: list[dict[str, Any]] = []
+    omitted = 0
+    for dependency_id in task["dependencies"]:
+        result = results.get(dependency_id)
+        if result is None:
+            candidate: dict[str, Any] = {
+                "task_id": dependency_id,
+                "status": statuses.get(dependency_id, "pending"),
+                "missing_result": True,
+            }
+        else:
+            candidate = {
+                "task_id": result["task_id"][:64],
+                "status": statuses.get(dependency_id, result["status"]),
+                "modified_files": result["modified_files"][:MAX_DEPENDENCY_FILES],
+                "change_summary": result["change_summary"][
+                    :MAX_DEPENDENCY_SUMMARY_CHARS
+                ],
+                "symbols": [
+                    symbol[:200]
+                    for symbol in result["symbols"][:MAX_DEPENDENCY_SYMBOLS]
+                ],
+                "workspace_snapshot_digest": result["workspace_snapshot_digest"][:64],
+                "content_sha256": result["content_sha256"],
+                "syntax_status": result["syntax_status"],
+            }
+        proposed = {
+            "version": 1,
+            "dependencies": [*selected, candidate],
+            "truncated": False,
+            "omitted_count": 0,
+        }
+        encoded = json.dumps(
+            proposed,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        if len(encoded) > MAX_DEPENDENCY_CONTEXT_CHARS:
+            omitted += 1
+            continue
+        selected.append(candidate)
+    payload = {
+        "version": 1,
+        "dependencies": selected,
+        "truncated": omitted > 0,
+        "omitted_count": omitted,
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    while len(encoded) > MAX_DEPENDENCY_CONTEXT_CHARS and selected:
+        selected.pop()
+        omitted += 1
+        payload.update(
+            dependencies=selected,
+            truncated=True,
+            omitted_count=omitted,
+        )
+        encoded = json.dumps(
+            payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    return encoded
 
 
 def schedule_next_task_node(state: State) -> dict[str, Any]:
@@ -87,6 +236,7 @@ def schedule_next_task_node(state: State) -> dict[str, Any]:
             continue
         if all(dependency in completed for dependency in task["dependencies"]):
             statuses[task_id] = "running"
+            dependency_context = render_dependency_context(state, task)
             transition: TaskTransition = {
                 "task_id": task_id,
                 "status": "running",
@@ -102,6 +252,7 @@ def schedule_next_task_node(state: State) -> dict[str, Any]:
                             f"目标: {task['description']}\n"
                             f"唯一允许写入路径: {task['file_path']}\n"
                             f"已完成依赖: {', '.join(task['dependencies']) or '无'}\n"
+                            f"[DEPENDENCY_RESULTS]\n{dependency_context}\n"
                             "只完成当前任务；成功写入指定文件后给出简短总结。"
                         )
                     )
@@ -153,7 +304,15 @@ def complete_active_task_node(state: State) -> dict[str, Any]:
 
     # 预算熔断优先于写入事实：成功写入后仍需要一个模型回合闭合 ToolCall。
     # 若该回合无法执行，任务对外没有可验证的完成声明，因此必须按失败终止。
+    dependency_result: TaskDependencyResult | None = None
+    dependency_result_error: str | None = None
     if state.get("active_task_write_succeeded") and not state.get("budget_exceeded"):
+        try:
+            dependency_result = _build_task_dependency_result(state, task_id)
+        except Exception as exc:
+            dependency_result_error = f"无法固化任务依赖结果: {exc}"
+
+    if dependency_result is not None:
         statuses[task_id] = "completed"
         if task_id not in completed:
             completed.append(task_id)
@@ -164,11 +323,14 @@ def complete_active_task_node(state: State) -> dict[str, Any]:
             "status": "completed",
             "retry_count": retries.get(task_id, 0),
         }
+        task_results = dict(state.get("task_results", {}))
+        task_results[task_id] = dependency_result
         return {
             "task_statuses": statuses,
             "active_task_id": None,
             "completed_task_ids": completed,
             "task_failures": failures,
+            "task_results": task_results,
             "plan_status": "completed" if all_completed else "running",
             "active_task_write_succeeded": False,
             "active_task_failure_reason": None,
@@ -178,12 +340,18 @@ def complete_active_task_node(state: State) -> dict[str, Any]:
     retry_count = retries.get(task_id, 0) + 1
     retries[task_id] = retry_count
     reason = (
-        state.get("budget_reason")
-        if state.get("budget_exceeded")
-        else state.get("active_task_failure_reason")
-    ) or "Developer 未成功写入当前任务指定文件"
+        dependency_result_error
+        or (
+            state.get("budget_reason")
+            if state.get("budget_exceeded")
+            else state.get("active_task_failure_reason")
+        )
+        or "Developer 未成功写入当前任务指定文件"
+    )
     failure_kind = (
-        "budget_exceeded" if state.get("budget_exceeded") else "task_incomplete"
+        "dependency_context_error"
+        if dependency_result_error
+        else ("budget_exceeded" if state.get("budget_exceeded") else "task_incomplete")
     )
     failure: TaskFailure = {
         "reason": reason,
@@ -296,9 +464,11 @@ def reopen_tasks_after_review(state: State) -> dict[str, Any]:
     reopened_ids = _downstream_task_ids(plan, set(failed_ids))
     statuses = dict(state.get("task_statuses", {}))
     failures = dict(state.get("task_failures", {}))
+    task_results = dict(state.get("task_results", {}))
     for task_id in reopened_ids:
         statuses[task_id] = "pending"
         failures.pop(task_id, None)
+        task_results.pop(task_id, None)
 
     completed = [
         task_id
@@ -318,6 +488,7 @@ def reopen_tasks_after_review(state: State) -> dict[str, Any]:
         "active_task_id": None,
         "completed_task_ids": completed,
         "task_failures": failures,
+        "task_results": task_results,
         "plan_status": "running",
         "active_task_write_succeeded": False,
         "active_task_failure_reason": None,

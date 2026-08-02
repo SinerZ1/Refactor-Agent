@@ -250,8 +250,8 @@ Architect 输出的 `refactor_plan` 不是展示数据，而是后端调度输�
 
 1. Pydantic 校验任务 ID、`CodeSmells/` 路径、依赖引用、重复项和环。
 2. 调度器按计划原始顺序选择第一个依赖已完成的 ready task，保证回归可重复。
-3. Developer 每次只获得当前任务及唯一允许写入路径；工具层再次执行路径授权。
-4. 成功写入后任务进入 `completed`，调度器继续选择下一任务。
+3. Developer 每次只获得当前任务、传递依赖文件及唯一允许写入路径；读写和符号查询都在工具层再次授权。
+4. 成功写入后固化受限的结构化任务结果（文件、符号、内容哈希和完整工作区摘要），再进入 `completed` 并传给下游。
 5. Reviewer 可以结构化指定失败任务；该任务及传递下游被重开，每个任务最多重试 3 次。
 6. 上游不可恢复失败会把剩余依赖任务标记为 `blocked`；预算耗尽进入明确失败终态。
 7. `plan.*`、`task.*` 与状态快照是前端 DAG 的权威数据源，不解析日志猜测状态。
@@ -262,7 +262,7 @@ Architect 输出的 `refactor_plan` 不是展示数据，而是后端调度输�
 
 | 边界 | 约束 |
 | --- | --- |
-| 角色能力 | Architect 只读；Developer 只能读写当前任务文件；Reviewer 只有固定测试工具 |
+| 角色能力 | Architect 查询用户原始源码；Developer 只读当前任务及已完成依赖、只写当前任务；Reviewer 只有固定测试工具 |
 | 文件系统 | 所有路径限制在 `CodeSmells/` 与受控 run 工作区；拒绝绝对路径和 `..` 越界 |
 | 用户源码 | Agent 只写 working 副本；最终应用前校验 baseline、working 与审批 diff 哈希 |
 | 凭据 | API Key 存在进程内短期凭据库，Graph config 与 checkpoint 只保存不透明引用 |
@@ -322,6 +322,7 @@ LangGraph 会把 `configurable` 中的标量复制到 checkpoint metadata。直�
 - 多文件应用依赖逐文件 `os.replace` 与补偿回滚；可处理进程内异常，但不等价于支持掉电恢复的文件系统事务。
 - 未配置 Redis 时 checkpoint 只在当前进程有效；进程内会话令牌和临时 API Key 也不会跨重启恢复。
 - AST 调用图主要覆盖静态 Python 语法，反射、动态导入和运行时猴子补丁可能无法建模。
+- Developer 的 run 级符号查询选择按需解析 working tree，优先保证隔离与新鲜度；代价是大型源码树的单次查询延迟高于共享缓存。
 - Reviewer 运行的是白名单测试套件，无法证明缺少测试覆盖的业务语义完全正确。
 - 真实模型 Eval 可能产生费用且受供应商波动影响；CI 只运行确定性的离线模式。
 - 当前重构写入边界固定为仓库中的 `CodeSmells/`，尚未提供任意外部仓库挂载。
