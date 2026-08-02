@@ -42,6 +42,8 @@ flowchart LR
 | Developer | `read_code_file`、`write_code_file`、`search_symbol_definition` | 当前任务以外写入、任意命令 |
 | Reviewer | `run_unit_tests` | 读文件、写文件、任意测试参数 |
 
+行为契约测试保存在 Agent 不可写的 `backend/behavior_tests/`。Reviewer 只获得固定套件映射，测试进程通过受控环境变量导入当前 run 的 `working/CodeSmells`；`CodeSmells/tests` 作为旧位置仍被路径策略永久保护，避免候选变更重新创建伪造测试。
+
 Reviewer 通过受控变更清单、摘要、测试上下文和工具证据完成裁决。测试工具把逻辑套件名映射为固定 argv，`shell=False`，不接受自由命令字符串。
 
 ## 4. 文件系统边界

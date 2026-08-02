@@ -178,7 +178,7 @@ def test_run_unit_tests_updates_state_with_bounded_versioned_record(monkeypatch)
     assert isinstance(message, ToolMessage)
     assert message.tool_call_id == "test-call-1"
     assert message.artifact["success"] is True
-    assert test_record["suite"] == "CodeSmells"
+    assert test_record["suite"] == "backend/behavior_tests (CodeSmells contract)"
     assert test_record["success"] is True
     assert test_record["exit_code"] == 0
     assert test_record["change_set_digest"] == compute_change_set_digest(changes)

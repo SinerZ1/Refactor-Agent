@@ -10,6 +10,7 @@ from langchain_core.tools import InjectedToolCallId, tool
 from langgraph.prebuilt import InjectedState
 from langgraph.types import Command
 
+from .path_policy import PathPolicyError, canonical_refactor_path
 from .state import ChangeRecord, State, TestRunRecord, compute_change_set_digest
 from .workspace import resolve_workspace_path
 
@@ -42,15 +43,15 @@ def resolve_path(file_path: str) -> str:
     修改自身后端或越界访问用户文件。
     """
 
-    if not file_path or not file_path.strip():
-        raise ValueError("文件路径不能为空")
-    requested_path = Path(file_path.strip())
-    if requested_path.is_absolute():
-        raise ValueError("仅允许使用 CodeSmells 目录内的相对路径")
-    resolved_path = (PROJECT_ROOT / requested_path).resolve(strict=False)
-    if not resolved_path.is_relative_to(REFACTOR_ROOT):
-        raise ValueError("文件路径超出允许的 CodeSmells 重构工作区")
-    return str(resolved_path)
+    try:
+        normalized = canonical_refactor_path(
+            file_path,
+            project_root=PROJECT_ROOT,
+            refactor_root=REFACTOR_ROOT,
+        )
+    except PathPolicyError as exc:
+        raise ValueError(str(exc)) from exc
+    return str((PROJECT_ROOT / normalized).resolve(strict=False))
 
 
 @tool(response_format="content_and_artifact")
@@ -271,8 +272,8 @@ def run_unit_tests(
     """
     suite_labels = {
         "backend": "backend/tests",
-        "codesmells": "CodeSmells",
-        "all": "backend/tests + CodeSmells",
+        "codesmells": "backend/behavior_tests (CodeSmells contract)",
+        "all": "backend/tests + backend/behavior_tests (CodeSmells contract)",
     }
     change_set_digest = compute_change_set_digest(state.get("change_records", []))
 
@@ -339,10 +340,10 @@ def run_unit_tests(
         workspace_root = resolve_workspace_path(workspace_id, "CodeSmells").parent
         test_targets = {
             "backend": [str(PROJECT_ROOT / "backend" / "tests")],
-            "codesmells": [str(workspace_root / "CodeSmells")],
+            "codesmells": [str(PROJECT_ROOT / "backend" / "behavior_tests")],
             "all": [
                 str(PROJECT_ROOT / "backend" / "tests"),
-                str(workspace_root / "CodeSmells"),
+                str(PROJECT_ROOT / "backend" / "behavior_tests"),
             ],
         }
         command = [
@@ -357,6 +358,7 @@ def run_unit_tests(
         # Reviewer 测试属于隔离工作区的验证过程，字节码是运行副产物而非 Agent
         # 变更；禁止生成 pyc，避免它们进入最终哈希或聚合 diff。
         test_environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        test_environment["REFACTOR_CODE_ROOT"] = str(workspace_root / "CodeSmells")
         test_environment["PYTHONPATH"] = os.pathsep.join(
             filter(
                 None,

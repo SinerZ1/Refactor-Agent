@@ -15,6 +15,7 @@ from agent.credentials import (
     EphemeralCredentialVault,
     runtime_credentials,
 )
+from agent.path_policy import is_protected_path
 from agent.state import State
 from app import RefactorRequest, authorize_refactor_request, build_graph_config
 from session_registry import runtime_sessions
@@ -176,6 +177,15 @@ def test_resolve_path_accepts_codesmells_relative_path():
     resolved = agent_tools.resolve_path("CodeSmells/main.py")
 
     assert resolved.endswith("CodeSmells\\main.py")
+
+
+def test_protected_path_policy_normalizes_absolute_and_relative_variants():
+    absolute_test = agent_tools.PROJECT_ROOT / "CodeSmells" / "tests" / "contract.py"
+
+    assert is_protected_path(str(absolute_test)) is True
+    assert is_protected_path("CodeSmells\\source\\..\\TESTS\\contract.py") is True
+    assert is_protected_path("backend/behavior_tests/./contract.py") is True
+    assert is_protected_path("CodeSmells/services.py") is False
 
 
 def test_unit_test_tool_uses_fixed_argv_without_shell(monkeypatch):

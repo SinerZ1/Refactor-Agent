@@ -64,7 +64,7 @@ py-modules = [
 evals = ["README.md", "baselines/*.json"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests", "../CodeSmells/tests"]
+testpaths = ["tests", "behavior_tests"]
 cache_dir = ".cache/pytest"
 addopts = ["-ra", "--strict-markers"]
 
@@ -106,7 +106,7 @@ source = [
     "model_catalog",
     "session_registry",
 ]
-omit = ["tests/*", "venv/*"]
+omit = ["tests/*", "behavior_tests/*", "venv/*"]
 
 [tool.coverage.report]
 show_missing = true

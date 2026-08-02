@@ -251,11 +251,91 @@ def test_reviewer_command_targets_working_snapshot(isolated_project, monkeypatch
     assert result["test_run_records"], result["messages"][-1]
     assert result["test_run_records"][-1]["success"] is True
     assert captured["cwd"] == str(working_root)
-    assert str(working_root / "CodeSmells") in captured["command"]
+    trusted_tests = agent_tools.PROJECT_ROOT / "backend" / "behavior_tests"
+    assert str(trusted_tests) in captured["command"]
+    assert str(working_root / "CodeSmells") not in captured["command"]
+    assert captured["env"]["REFACTOR_CODE_ROOT"] == str(working_root / "CodeSmells")
     assert captured["env"]["PYTHONPATH"].split(agent_tools.os.pathsep)[0] == str(
         working_root
     )
     assert captured["env"]["PYTHONDONTWRITEBYTECODE"] == "1"
+
+
+def test_reviewer_runs_trusted_contract_against_working_source():
+    workspace_state = agent_workspace.create_run_workspace()
+    graph_builder = StateGraph(State)
+    graph_builder.add_node("tools", ToolNode([agent_tools.run_unit_tests]))
+    graph_builder.add_edge(START, "tools")
+    graph_builder.add_edge("tools", END)
+    graph = graph_builder.compile()
+
+    def invoke(call_id):
+        return graph.invoke(
+            {
+                "messages": [
+                    AIMessage(
+                        content="",
+                        tool_calls=[
+                            {
+                                "name": "run_unit_tests",
+                                "args": {"test_suite": "codesmells"},
+                                "id": call_id,
+                                "type": "tool_call",
+                            }
+                        ],
+                    )
+                ],
+                "retry_count": 0,
+                "change_records": [],
+                "test_run_records": [],
+                **workspace_state,
+            }
+        )
+
+    try:
+        passing = invoke("trusted-pass")
+        assert passing["test_run_records"][-1]["success"] is True
+
+        candidate = agent_workspace.resolve_workspace_path(
+            workspace_state["workspace_id"], "CodeSmells/Calculator.py"
+        )
+        candidate.write_text(
+            "def calc(_a, _b, _operator):\n    return -999\n",
+            encoding="utf-8",
+        )
+        failing = invoke("trusted-fail")
+        assert failing["test_run_records"][-1]["success"] is False
+        assert failing["test_run_records"][-1]["exit_code"] != 0
+    finally:
+        agent_workspace.cleanup_run_workspace(workspace_state["workspace_id"])
+
+
+def test_aggregate_and_apply_reject_protected_test_changes(isolated_project):
+    _project_root, code_root = isolated_project
+    protected = code_root / "tests" / "test_contract.py"
+    protected.parent.mkdir()
+    protected.write_text("def test_contract():\n    assert True\n", encoding="utf-8")
+    state = agent_workspace.create_run_workspace()
+    working_protected = (
+        agent_workspace.WORKSPACE_ROOT
+        / state["workspace_id"]
+        / "working"
+        / "CodeSmells"
+        / "tests"
+        / "test_contract.py"
+    )
+    working_protected.write_text(
+        "def test_contract():\n    assert False\n", encoding="utf-8"
+    )
+
+    with pytest.raises(agent_workspace.WorkspaceError, match="行为契约测试"):
+        agent_workspace.build_aggregate_diff(state["workspace_id"])
+
+    working_root = agent_workspace.WORKSPACE_ROOT / state["workspace_id"] / "working"
+    state["final_file_hashes"] = agent_workspace._hash_snapshot(working_root)
+    with pytest.raises(agent_workspace.WorkspaceError, match="行为契约测试"):
+        agent_workspace.atomic_apply_workspace(state)
+    assert "assert True" in protected.read_text(encoding="utf-8")
 
 
 def test_runtime_bytecode_is_excluded_from_final_diff(isolated_project):

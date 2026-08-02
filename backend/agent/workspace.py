@@ -12,6 +12,7 @@ from typing import Any
 from langgraph.errors import GraphInterrupt
 from langgraph.types import interrupt
 
+from .path_policy import PathPolicyError, canonical_refactor_path, is_protected_path
 from .state import State
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -72,15 +73,36 @@ def _snapshot_root(workspace_id: str, snapshot: str) -> Path:
 
 
 def _canonical_relative_path(file_path: str) -> Path:
-    if not file_path or not file_path.strip():
-        raise WorkspaceError("文件路径不能为空")
-    requested = Path(file_path.strip())
-    if requested.is_absolute():
-        raise WorkspaceError("仅允许使用 CodeSmells 目录内的相对路径")
-    resolved = (PROJECT_ROOT / requested).resolve(strict=False)
-    if not resolved.is_relative_to(REFACTOR_ROOT):
-        raise WorkspaceError("文件路径超出允许的 CodeSmells 重构工作区")
-    return resolved.relative_to(PROJECT_ROOT)
+    try:
+        normalized = canonical_refactor_path(
+            file_path,
+            project_root=PROJECT_ROOT,
+            refactor_root=REFACTOR_ROOT,
+        )
+    except PathPolicyError as exc:
+        raise WorkspaceError(str(exc)) from exc
+    return Path(normalized)
+
+
+def _assert_no_protected_changes(
+    baseline_files: dict[str, Path],
+    final_files: dict[str, Path],
+) -> None:
+    """在候选集合边界再次检查可信测试，覆盖删除、创建、修改与重命名。"""
+
+    for relative in sorted(set(baseline_files) | set(final_files)):
+        before = baseline_files.get(relative)
+        after = final_files.get(relative)
+        before_bytes = before.read_bytes() if before is not None else None
+        after_bytes = after.read_bytes() if after is not None else None
+        if before_bytes == after_bytes:
+            continue
+        try:
+            protected = is_protected_path(relative, project_root=PROJECT_ROOT)
+        except PathPolicyError as exc:
+            raise WorkspaceError(str(exc)) from exc
+        if protected:
+            raise WorkspaceError(f"候选变更触及可信行为契约测试 `{relative}`，拒绝继续")
 
 
 def resolve_workspace_path(workspace_id: str, file_path: str) -> Path:
@@ -176,6 +198,7 @@ def build_aggregate_diff(
     working_root = _snapshot_root(workspace_id, "working")
     baseline_files = _iter_snapshot_files(baseline_root)
     final_files = _iter_snapshot_files(working_root)
+    _assert_no_protected_changes(baseline_files, final_files)
     final_hashes = {
         relative: _sha256_bytes(path.read_bytes())
         for relative, path in sorted(final_files.items())
@@ -318,6 +341,7 @@ def atomic_apply_workspace(state: State) -> None:
         raise WorkspaceError("审批后的隔离工作区内容已改变，拒绝应用")
     baseline_files = _iter_snapshot_files(baseline_root)
     final_files = _iter_snapshot_files(working_root)
+    _assert_no_protected_changes(baseline_files, final_files)
     changed = [
         relative
         for relative in sorted(set(baseline_files) | set(final_files))

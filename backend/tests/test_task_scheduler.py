@@ -1,3 +1,4 @@
+import pytest
 from langchain_core.messages import AIMessage
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
@@ -253,6 +254,54 @@ def test_isolated_write_keeps_active_task_without_touching_real_file(
         ).read_text(encoding="utf-8")
         == "new = True\n"
     )
+
+
+@pytest.mark.parametrize(
+    "protected_path",
+    [
+        "CodeSmells/tests/test_contract.py",
+        "CodeSmells\\tests\\test_contract.py",
+        "codesmells/TESTS/test_contract.py",
+        "CodeSmells/source/../tests/test_contract.py",
+    ],
+)
+def test_write_tool_rejects_protected_behavior_test_variants(
+    tmp_path, monkeypatch, protected_path
+):
+    code_root = tmp_path / "CodeSmells"
+    code_root.mkdir()
+    monkeypatch.setattr(agent_tools, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(agent_tools, "REFACTOR_ROOT", code_root)
+    monkeypatch.setattr(agent_workspace, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(agent_workspace, "REFACTOR_ROOT", code_root)
+    monkeypatch.setattr(
+        agent_workspace, "WORKSPACE_ROOT", tmp_path / ".refactor-workspaces"
+    )
+    workspace_state = agent_workspace.create_run_workspace()
+    tool_call = {
+        "name": "write_code_file",
+        "args": {"file_path": protected_path, "content": "assert True\n"},
+        "id": "write-protected-test",
+        "type": "tool_call",
+    }
+    graph_builder = StateGraph(State)
+    graph_builder.add_node("tools", ToolNode([agent_tools.write_code_file]))
+    graph_builder.add_edge(START, "tools")
+    graph_builder.add_edge("tools", END)
+
+    result = graph_builder.compile().invoke(
+        {
+            "messages": [AIMessage(content="", tool_calls=[tool_call])],
+            "retry_count": 0,
+            "change_records": [],
+            **workspace_state,
+        }
+    )
+
+    assert result["messages"][-1].artifact["success"] is False
+    assert result["messages"][-1].artifact["failure_kind"] == "write_error"
+    assert "行为契约测试" in result["messages"][-1].content
+    assert result["change_records"] == []
 
 
 def test_reviewer_reopens_selected_task_and_transitive_downstream_only():

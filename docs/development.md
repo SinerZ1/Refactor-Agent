@@ -122,7 +122,7 @@ venv\Scripts\python.exe -m evals.run --mode offline
 | `check-sort-imports.exe` | isort 导入顺序 |
 | `check-mypy.exe` | 可部署后端与 Eval 类型 |
 | `check-lint.exe` | Ruff |
-| `test-coverage.exe` | 后端和 `CodeSmells/tests` 的 Pytest + coverage，最低 75% |
+| `test-coverage.exe` | 后端单元测试和只读 `backend/behavior_tests` 行为契约的 Pytest + coverage，最低 75% |
 | `evals.run --mode offline` | 24 个 Agent 控制面场景与基准漂移 |
 
 需要主动修复格式时才运行：

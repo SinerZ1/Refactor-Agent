@@ -99,3 +99,17 @@ def test_missing_plan_block_is_a_nonfatal_fallback():
     assert plan is None
     assert error is not None
     assert "默认任务图" in error
+
+
+@pytest.mark.parametrize(
+    "protected_path",
+    [
+        "CodeSmells/tests/test_contract.py",
+        "CodeSmells\\tests\\test_contract.py",
+        "codesmells/TESTS/test_contract.py",
+        "CodeSmells/source/../tests/./test_contract.py",
+    ],
+)
+def test_plan_validator_rejects_protected_behavior_tests(protected_path):
+    with pytest.raises(ValueError, match="行为契约测试"):
+        validate_refactor_plan(_plan([_task("tamper", protected_path)]))

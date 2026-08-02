@@ -5,6 +5,9 @@ from typing import Any, Literal, TypedDict
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from .path_policy import PathPolicyError
+from .path_policy import canonical_refactor_path as secure_path
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 REFACTOR_ROOT = (PROJECT_ROOT / "CodeSmells").resolve()
 PLAN_BLOCK_PATTERN = re.compile(
@@ -68,17 +71,17 @@ def canonicalize_refactor_path(file_path: str) -> str:
     建立 capability boundary，防止一个看似合法的 DAG 把后续写入能力引向工作区外。
     """
 
-    if not file_path or not file_path.strip():
-        raise ValueError("文件路径不能为空")
-    requested_path = Path(file_path.strip())
-    if requested_path.is_absolute():
-        raise ValueError("计划只能引用 CodeSmells 目录内的相对路径")
-    resolved_path = (PROJECT_ROOT / requested_path).resolve(strict=False)
-    if not resolved_path.is_relative_to(REFACTOR_ROOT):
-        raise ValueError("计划路径超出允许的 CodeSmells 重构工作区")
-    if resolved_path.suffix.casefold() != ".py":
+    try:
+        normalized_path = secure_path(
+            file_path,
+            project_root=PROJECT_ROOT,
+            refactor_root=REFACTOR_ROOT,
+        )
+    except PathPolicyError as exc:
+        raise ValueError(str(exc)) from exc
+    if Path(normalized_path).suffix.casefold() != ".py":
         raise ValueError("计划任务只能引用 CodeSmells 目录内的 Python 文件")
-    return resolved_path.relative_to(PROJECT_ROOT).as_posix()
+    return normalized_path
 
 
 def _assert_acyclic(tasks: list[RefactorTask]) -> None:

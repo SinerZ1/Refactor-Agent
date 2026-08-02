@@ -69,7 +69,7 @@ jobs:
       - name: Ruff
         run: .\venv\Scripts\check-lint.exe
 
-      - name: Unit tests and coverage
+      - name: Unit and trusted behavior tests with coverage
         run: .\venv\Scripts\test-coverage.exe
 
       - name: Offline Agent eval
