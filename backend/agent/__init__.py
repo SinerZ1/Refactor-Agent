@@ -1,4 +1,5 @@
 import asyncio
+import threading
 from collections.abc import Callable, Coroutine, Iterator
 from typing import Any, cast
 
@@ -77,6 +78,7 @@ def stream_refactor(
     config: RunnableConfig | None = None,
     ws_callback: Callable[[str, str, str], Coroutine[Any, Any, Any]] | None = None,
     main_loop: asyncio.AbstractEventLoop | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> Iterator[AgentEvent]:
     """
     使用 LangGraph 状态图执行多轮对话，并输出版本化结构事件。
@@ -93,6 +95,8 @@ def stream_refactor(
         if "configurable" in config:
             run_config["configurable"].update(config["configurable"])
 
+    if cancel_event is not None and cancel_event.is_set():
+        return
     yield make_agent_event(
         "run.started",
         "重构工作流已启动",
@@ -180,6 +184,8 @@ def stream_refactor(
             run_config,
             stream_mode="updates",
         ):
+            if cancel_event is not None and cancel_event.is_set():
+                return
             for node_name, node_output in chunk.items():
                 if "task_statuses" in node_output:
                     task_statuses = dict(node_output["task_statuses"])

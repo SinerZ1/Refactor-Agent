@@ -38,6 +38,8 @@ def test_stream_run_lease_rejects_overlap_and_scopes_every_event(monkeypatch):
     )
 
     class FakeGraph:
+        checkpointer = SimpleNamespace(delete_thread=lambda _thread_id: None)
+
         def get_state(self, _config):
             return SimpleNamespace(
                 values={"review_status": "success"},
@@ -84,22 +86,35 @@ def test_hitl_resume_keeps_run_identity_until_terminal_state(monkeypatch):
         session_token=credentials.session_token,
     )
     lifecycle = {"resumed": False}
+    workspace_id = "a" * 32
+    workspace_digest = "b" * 64
     interrupt_payload = {
-        "type": "write_approval",
+        "type": "aggregate_diff_approval",
         "file_path": "CodeSmells/main.py",
         "original_code": "old",
         "refactored_code": "new",
     }
 
     class FakeGraph:
+        checkpointer = SimpleNamespace(delete_thread=lambda _thread_id: None)
+
         def get_state(self, _config):
             if lifecycle["resumed"]:
                 return SimpleNamespace(
-                    values={"review_status": "success"},
+                    values={
+                        "review_status": "success",
+                        "workspace_id": workspace_id,
+                        "workspace_applied": True,
+                    },
                     interrupts=(),
                 )
             return SimpleNamespace(
-                values={"review_status": "running"},
+                values={
+                    "review_status": "running",
+                    "workspace_id": workspace_id,
+                    "final_workspace_snapshot_digest": workspace_digest,
+                    "review_evidence": {"workspace_snapshot_digest": workspace_digest},
+                },
                 interrupts=(SimpleNamespace(value=interrupt_payload),),
             )
 
@@ -110,6 +125,12 @@ def test_hitl_resume_keeps_run_identity_until_terminal_state(monkeypatch):
 
     monkeypatch.setattr(agent, "app_graph", FakeGraph())
     monkeypatch.setattr(app_module, "stream_refactor", fake_stream)
+    monkeypatch.setattr(
+        app_module,
+        "build_workspace_snapshot",
+        lambda _workspace_id: {"digest": workspace_digest},
+    )
+    monkeypatch.setattr(app_module, "cleanup_run_workspace", lambda _workspace_id: None)
 
     http_request = _ConnectedRequest()
     suspended_events = _collect_sse(

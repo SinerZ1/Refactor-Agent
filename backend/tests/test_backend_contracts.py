@@ -277,6 +277,14 @@ def test_sse_disconnect_releases_run_lease_and_ephemeral_credential(monkeypatch)
         return credential_ref
 
     monkeypatch.setattr(runtime_credentials, "store", capture_store)
+    producer_exited = threading.Event()
+
+    def cancellable_stream(*_args, cancel_event, **_kwargs):
+        cancel_event.wait()
+        producer_exited.set()
+        yield from ()
+
+    monkeypatch.setattr(app_module, "stream_refactor", cancellable_stream)
     response = app_module.refactor_code_stream(request, _DisconnectedRequest())
 
     async def start_then_disconnect():
@@ -286,6 +294,7 @@ def test_sse_disconnect_releases_run_lease_and_ephemeral_credential(monkeypatch)
 
     asyncio.run(start_then_disconnect())
 
+    assert producer_exited.is_set()
     with pytest.raises(RunStateError):
         runtime_sessions.require_active_run(
             credentials.thread_id,

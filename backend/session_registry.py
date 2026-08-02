@@ -131,6 +131,36 @@ class SessionRegistry:
             record.approval_decision = None
             return True
 
+    def finish_owned_run(self, thread_id: str, run_id: str) -> bool:
+        """服务内部按不可预测 run_id 释放租约，不在长生命周期回调中捕获会话令牌。"""
+
+        with self._lock:
+            record = self._records.get(thread_id)
+            if record is None or record.active_run_id != run_id:
+                return False
+            record.active_run_id = None
+            record.approval_id = None
+            record.approval_decision = None
+            return True
+
+    def is_resumable_approval(
+        self,
+        thread_id: str,
+        run_id: str,
+        approval_id: str,
+    ) -> bool:
+        """HITL 保留不能靠控制流猜测，必须同时绑定活动租约和待决审批。"""
+
+        with self._lock:
+            record = self._records.get(thread_id)
+            return bool(
+                record
+                and record.active_run_id == run_id
+                and record.approval_id
+                and hmac.compare_digest(record.approval_id, approval_id)
+                and record.approval_decision is None
+            )
+
     def begin_approval(
         self,
         thread_id: str,

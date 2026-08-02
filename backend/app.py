@@ -1,7 +1,6 @@
 import asyncio
 import json
 import os
-import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Literal
@@ -24,7 +23,14 @@ from agent.budgets import (
 )
 from agent.credentials import runtime_credentials
 from agent.events import AgentEvent, make_agent_event
+from agent.run_lifecycle import (
+    HitlRetention,
+    RunLifecycle,
+    RunTermination,
+    active_runs,
+)
 from agent.workflow import get_checkpointer_health
+from agent.workspace import build_workspace_snapshot, cleanup_run_workspace
 from agent_core import stream_refactor
 from code_indexer import index_directory
 from graph_indexer import get_neo4j_health, get_topology_data, index_to_neo4j
@@ -51,6 +57,7 @@ load_dotenv()
 
 main_loop: asyncio.AbstractEventLoop | None = None
 SSE_HEARTBEAT_SECONDS = 15.0
+PRODUCER_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 
 
 @asynccontextmanager
@@ -70,6 +77,9 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        # ASGI shutdown 先停止并有界等待 producer，再释放其依赖；不能依赖 atexit
+        # 猜测异步任务是否已经结束。
+        await active_runs.shutdown()
         main_loop = None
 
 
@@ -457,9 +467,39 @@ def refactor_code_stream(request: RefactorRequest, http_request: Request):
         event_loop = asyncio.get_running_loop()
         event_queue: asyncio.Queue[object] = asyncio.Queue()
         producer_finished = object()
-        stop_requested = threading.Event()
         stream_failed = False
-        keep_run_open = False
+        termination = RunTermination.GENERATOR_CLOSED
+        hitl_retained = False
+
+        from agent import app_graph
+
+        def delete_checkpoint(thread_id: str) -> None:
+            checkpointer = app_graph.checkpointer
+            delete_thread = getattr(checkpointer, "delete_thread", None)
+            if callable(delete_thread):
+                delete_thread(thread_id)
+
+        def resolve_workspace() -> str | None:
+            state = app_graph.get_state(config)
+            workspace_id = state.values.get("workspace_id")
+            return str(workspace_id) if workspace_id else None
+
+        lifecycle = RunLifecycle(
+            run_id=run_id,
+            thread_id=request.thread_id,
+            credential_ref=credential_ref,
+            finish_lease=lambda: runtime_sessions.finish_owned_run(
+                request.thread_id, run_id
+            ),
+            revoke_credential=runtime_credentials.revoke,
+            delete_checkpoint=delete_checkpoint,
+            cleanup_workspace=cleanup_run_workspace,
+            resolve_workspace=resolve_workspace,
+            unregister=active_runs.unregister,
+            producer_timeout_seconds=PRODUCER_SHUTDOWN_TIMEOUT_SECONDS,
+        )
+        active_runs.register(lifecycle)
+        stop_requested = lifecycle.stop_requested
 
         def enqueue(item: object) -> None:
             if stop_requested.is_set():
@@ -480,7 +520,7 @@ def refactor_code_stream(request: RefactorRequest, http_request: Request):
             return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
         def produce_events() -> None:
-            nonlocal keep_run_open, stream_failed
+            nonlocal hitl_retained, stream_failed, termination
             try:
                 for event in stream_refactor(
                     request.code,
@@ -488,6 +528,7 @@ def refactor_code_stream(request: RefactorRequest, http_request: Request):
                     config,
                     send_run_chatroom_message,
                     main_loop,
+                    cancel_event=stop_requested,
                 ):
                     if stop_requested.is_set():
                         return
@@ -500,23 +541,26 @@ def refactor_code_stream(request: RefactorRequest, http_request: Request):
                     return
 
                 # 阶段 2：执行完毕后，检查是否产生了新的挂起（Interrupt）
-                from agent import app_graph
-
                 try:
                     state = app_graph.get_state(config)
+                    workspace_id = state.values.get("workspace_id")
+                    lifecycle.set_workspace(
+                        str(workspace_id) if workspace_id is not None else None
+                    )
                     if state.interrupts:
                         raw_val = state.interrupts[0].value
                         interrupt_payload = (
                             dict(raw_val) if isinstance(raw_val, dict) else {}
                         )
+                        if interrupt_payload.get("type") != "aggregate_diff_approval":
+                            raise RuntimeError("checkpoint 不包含可恢复的最终审批请求")
                         interrupt_payload.setdefault("file_path", "")
                         interrupt_payload.setdefault("original_code", "")
                         interrupt_payload.setdefault("refactored_code", "")
-                        interrupt_payload["approval_id"] = (
-                            runtime_sessions.begin_approval(
-                                request.thread_id, session_token, run_id
-                            )
+                        approval_id = runtime_sessions.begin_approval(
+                            request.thread_id, session_token, run_id
                         )
+                        interrupt_payload["approval_id"] = approval_id
                         active_task_id = state.values.get("active_task_id")
                         interrupt_payload["task_statuses"] = state.values.get(
                             "task_statuses", {}
@@ -525,7 +569,34 @@ def refactor_code_stream(request: RefactorRequest, http_request: Request):
                         interrupt_payload["plan_status"] = state.values.get(
                             "plan_status", "fallback"
                         )
-                        keep_run_open = True
+                        final_digest = str(
+                            state.values.get("final_workspace_snapshot_digest", "")
+                        )
+                        review_evidence = state.values.get("review_evidence") or {}
+                        reviewed_digest = str(
+                            review_evidence.get("workspace_snapshot_digest", "")
+                        )
+                        if not workspace_id:
+                            raise RuntimeError("审批 checkpoint 缺少 workspace_id")
+                        current_digest = build_workspace_snapshot(str(workspace_id))[
+                            "digest"
+                        ]
+                        if not (
+                            current_digest == final_digest == reviewed_digest
+                            and runtime_sessions.is_resumable_approval(
+                                request.thread_id, run_id, approval_id
+                            )
+                        ):
+                            raise RuntimeError("审批 checkpoint 与工作区快照不一致")
+                        lifecycle.retain_for_hitl(
+                            HitlRetention(
+                                workspace_id=str(workspace_id),
+                                approval_id=approval_id,
+                                workspace_snapshot_digest=current_digest,
+                            )
+                        )
+                        hitl_retained = True
+                        termination = RunTermination.HITL_PAUSED
                         print(
                             f"[app] Graph suspended on interrupt for `{request.thread_id}`."
                         )
@@ -573,6 +644,7 @@ def refactor_code_stream(request: RefactorRequest, http_request: Request):
                             and (not workspace_id or workspace_applied)
                             and not stream_failed
                         ):
+                            termination = RunTermination.COMPLETED
                             enqueue(
                                 serialize_run_event(
                                     make_agent_event(
@@ -585,6 +657,11 @@ def refactor_code_stream(request: RefactorRequest, http_request: Request):
                                 )
                             )
                         elif review_status == "failed" and not stream_failed:
+                            termination = (
+                                RunTermination.BUDGET_EXCEEDED
+                                if state.values.get("budget_exceeded", False)
+                                else RunTermination.FAILED
+                            )
                             enqueue(
                                 serialize_run_event(
                                     make_agent_event(
@@ -596,24 +673,35 @@ def refactor_code_stream(request: RefactorRequest, http_request: Request):
                                     )
                                 )
                             )
+                        elif stream_failed:
+                            termination = RunTermination.FAILED
                 except Exception as exc:
+                    stream_failed = True
+                    termination = RunTermination.RECOVERY_FAILED
                     print(
                         "[app] Failed to check state interrupts "
                         f"({exc.__class__.__name__})."
                     )
+                    enqueue(
+                        serialize_run_event(
+                            make_agent_event(
+                                "run.failed",
+                                "运行状态无法安全完成或恢复",
+                                level="error",
+                                node="workflow",
+                                success=False,
+                            )
+                        )
+                    )
             finally:
                 enqueue(producer_finished)
 
-        producer = threading.Thread(
-            target=produce_events,
-            name=f"sse-run-{run_id}",
-            daemon=True,
-        )
-        producer.start()
+        lifecycle.start_producer(produce_events)
 
         try:
             while True:
                 if await http_request.is_disconnected():
+                    termination = RunTermination.DISCONNECTED
                     break
                 try:
                     item = await asyncio.wait_for(
@@ -622,26 +710,23 @@ def refactor_code_stream(request: RefactorRequest, http_request: Request):
                     )
                 except TimeoutError:
                     if await http_request.is_disconnected():
+                        termination = RunTermination.DISCONNECTED
                         break
                     yield ": heartbeat\n\n"
                     continue
                 if item is producer_finished:
                     break
                 yield str(item)
+        except asyncio.CancelledError:
+            termination = RunTermination.CANCELLATION
+            raise
         finally:
-            # 断连相当于取消当前状态机消费者：先阻止生产者投递后续事件，再释放
-            # 租约与短期凭据。HITL 挂起是唯一保留 run 租约的正常终止路径。
-            stop_requested.set()
-            if not keep_run_open:
-                try:
-                    runtime_sessions.finish_run(
-                        request.thread_id,
-                        session_token,
-                        run_id,
-                    )
-                except SessionAuthorizationError:
-                    pass
-            runtime_credentials.revoke(credential_ref)
+            # 生命周期对象严格执行 stop -> join/取异常 -> 凭据/checkpoint/lease ->
+            # workspace 的顺序。HITL 保留由经过快照和审批绑定校验的显式状态决定。
+            await lifecycle.cleanup(
+                termination,
+                retain_for_hitl=hitl_retained,
+            )
 
     return StreamingResponse(
         event_generator(),

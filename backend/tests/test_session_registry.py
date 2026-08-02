@@ -63,6 +63,39 @@ def test_pending_approval_id_is_idempotent_until_decided():
     assert first == second
 
 
+def test_hitl_retention_requires_matching_active_run_and_pending_approval():
+    registry = SessionRegistry()
+    credentials = registry.create()
+    run_id = registry.begin_run(credentials.thread_id, credentials.session_token)
+    approval_id = registry.begin_approval(
+        credentials.thread_id, credentials.session_token, run_id
+    )
+
+    assert registry.is_resumable_approval(credentials.thread_id, run_id, approval_id)
+    assert not registry.is_resumable_approval(
+        credentials.thread_id, "stale-run", approval_id
+    )
+    registry.decide(
+        credentials.thread_id,
+        credentials.session_token,
+        approval_id,
+        False,
+    )
+    assert not registry.is_resumable_approval(
+        credentials.thread_id, run_id, approval_id
+    )
+
+
+def test_internal_lease_release_only_accepts_current_run_id():
+    registry = SessionRegistry()
+    credentials = registry.create()
+    run_id = registry.begin_run(credentials.thread_id, credentials.session_token)
+
+    assert not registry.finish_owned_run(credentials.thread_id, "stale-run")
+    assert registry.finish_owned_run(credentials.thread_id, run_id)
+    assert not registry.finish_owned_run(credentials.thread_id, run_id)
+
+
 def test_single_session_run_lease_rejects_concurrent_dag_execution():
     registry = SessionRegistry()
     credentials = registry.create()
