@@ -98,8 +98,9 @@ def check_lint():
 
 
 def find_dead_code():
-    # FastAPI 路由、TypedDict 字段与 console script 入口由框架动态引用。
-    # 80% 阈值保留高置信死代码信号，过滤这类无法通过静态调用图识别的误报。
+    # FastAPI 路由、Pydantic 回调与 console script 入口包含框架隐式调用。回调中未使用
+    # 的注入参数在定义处用下划线精确标记；这里仍保持 80% 高置信阈值和完整后端扫描，
+    # 不以全局 ignore-name/ignore-decorator 掩盖同名的真实未使用符号。
     run_command(
         [
             "vulture",

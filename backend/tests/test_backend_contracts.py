@@ -1,5 +1,7 @@
 import asyncio
 import socket
+import subprocess
+import sys
 import threading
 
 import pytest
@@ -223,8 +225,8 @@ def test_sse_headers_and_heartbeat_are_transport_only(monkeypatch):
 
     def delayed_stream(*_args, **_kwargs):
         release_producer.wait(timeout=1)
-        if False:
-            yield
+        # 保持与 stream_refactor 一致的生成器协议，但不伪造恒假控制流。
+        yield from ()
 
     monkeypatch.setattr(app_module, "SSE_HEARTBEAT_SECONDS", 0.01)
     monkeypatch.setattr(app_module, "stream_refactor", delayed_stream)
@@ -291,6 +293,31 @@ def test_sse_disconnect_releases_run_lease_and_ephemeral_credential(monkeypatch)
         )
     with pytest.raises(CredentialReferenceError):
         runtime_credentials.resolve(captured_ref["value"])
+
+
+def test_dead_code_scanner_still_rejects_real_unused_symbol(tmp_path):
+    candidate = tmp_path / "unused_candidate.py"
+    candidate.write_text(
+        "import genuinely_unused\n",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "vulture",
+            str(candidate),
+            "--min-confidence",
+            "80",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "genuinely_unused" in result.stdout
 
 
 def test_simple_refactor_propagates_workflow_exception(monkeypatch):

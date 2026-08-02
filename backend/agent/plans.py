@@ -44,7 +44,9 @@ class _RefactorTaskInput(BaseModel):
 
     @field_validator("id")
     @classmethod
-    def validate_task_id(cls, value: str) -> str:
+    def validate_task_id(_cls, value: str) -> str:
+        # Pydantic 按 field_validator 协议注入模型类；下划线显式表达该回调无需类状态，
+        # 也避免 Vulture 把框架隐式调用参数误判为业务死代码。
         if not TASK_ID_PATTERN.fullmatch(value):
             raise ValueError("任务 ID 只能使用小写字母、数字、下划线和连字符")
         if value in RESERVED_TASK_IDS:

@@ -237,7 +237,8 @@ class RuntimeModelConfig(BaseModel):
 
     @field_validator("base_url")
     @classmethod
-    def validate_base_url_structure(cls, value: str) -> str:
+    def validate_base_url_structure(_cls, value: str) -> str:
+        # ``_cls`` 由 Pydantic validator 协议注入；此纯值校验不依赖模型类。
         if not value.strip():
             return value
         return validate_base_url_syntax(value)
@@ -287,7 +288,8 @@ class ModelConnectionRequest(BaseModel):
 
     @field_validator("base_url")
     @classmethod
-    def validate_base_url_structure(cls, value: str) -> str:
+    def validate_base_url_structure(_cls, value: str) -> str:
+        # ``_cls`` 由 Pydantic validator 协议注入；此纯值校验不依赖模型类。
         if not value.strip():
             return value
         return validate_base_url_syntax(value)
