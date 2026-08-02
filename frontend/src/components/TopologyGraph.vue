@@ -223,8 +223,8 @@ defineExpose({
       <span class="title"
         ><span class="panel-icon" aria-hidden="true">⌘</span> 代码架构拓扑图谱</span
       >
-      <span v-if="isFallback" class="badge-fallback">AST 降级模式</span>
-      <span v-else class="badge-neo4j">Neo4j 图数据</span>
+      <span v-if="isFallback" class="topology-badge fallback">AST 降级模式</span>
+      <span v-else class="topology-badge neo4j">Neo4j 图数据</span>
       <button @click="fetchTopology" :disabled="loading" class="refresh-btn">
         {{ loading ? '刷新中...' : '刷新图谱' }}
       </button>
@@ -240,67 +240,78 @@ defineExpose({
 </template>
 
 <style scoped>
+/*
+ * 拓扑图是异步挂载的独立主题边界，直接消费 App 根节点继承下来的语义令牌。
+ * 组件自身不再硬编码某个主题，也不依赖父组件用高优先级选择器进行事后修补。
+ */
 .topology-container {
   display: flex;
   flex-direction: column;
   height: 100%;
   width: 100%;
-  background-color: #1e1e1e;
+  background: var(--surface-muted);
 }
 
 .topology-toolbar {
   display: flex;
   align-items: center;
   gap: 0.8rem;
-  padding: 0.6rem 0.8rem;
-  background-color: #2d2d2d;
-  border-bottom: 1px solid #3d3d3d;
+  min-height: 43px;
+  padding: 0.68rem 0.8rem;
+  background: var(--surface-muted);
+  border-bottom: 1px solid var(--border);
 }
 
 .topology-toolbar .title {
-  font-size: 0.9rem;
-  font-weight: bold;
-  color: #dcdcaa;
+  color: var(--text-soft);
+  font-size: 0.84rem;
+  font-weight: 720;
+  letter-spacing: -0.01em;
 }
 
 .panel-icon {
   display: inline-grid;
   width: 1rem;
   place-items: center;
+  color: var(--primary);
   font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
   font-weight: 800;
 }
 
-.badge-fallback {
+.topology-badge {
   font-size: 10px;
-  background-color: #885500;
-  color: #fff;
   padding: 2px 6px;
   border-radius: 4px;
+  font-weight: 700;
 }
 
-.badge-neo4j {
-  font-size: 10px;
-  background-color: #0b533e;
-  color: #fff;
-  padding: 2px 6px;
-  border-radius: 4px;
+.topology-badge.fallback {
+  background: var(--warning);
+  color: var(--surface);
+}
+
+.topology-badge.neo4j {
+  background: var(--accent-soft);
+  color: var(--accent);
 }
 
 .refresh-btn {
   margin-left: auto;
-  background-color: #3c3c3c;
-  border: none;
-  color: #fff;
+  background: var(--surface-strong);
+  border: 1px solid var(--border-strong);
+  color: var(--text-soft);
   padding: 3px 8px;
   font-size: 11px;
-  border-radius: 4px;
+  border-radius: 6px;
   cursor: pointer;
-  transition: background-color 0.2s;
+  transition:
+    background-color 160ms ease,
+    color 160ms ease;
 }
 
 .refresh-btn:hover {
-  background-color: #4c4c4c;
+  background: var(--primary-soft);
+  color: var(--primary);
 }
 
 .graph-canvas {
@@ -320,12 +331,12 @@ defineExpose({
 }
 
 .error-text {
-  color: #f44336;
+  color: var(--danger);
   font-size: 0.9rem;
 }
 
 .retry-btn {
-  background-color: #0b533e;
+  background: var(--primary);
   color: #fff;
   border: none;
   padding: 5px 12px;
@@ -335,6 +346,6 @@ defineExpose({
 }
 
 .retry-btn:hover {
-  background-color: #0d6d50;
+  background: var(--primary-hover);
 }
 </style>

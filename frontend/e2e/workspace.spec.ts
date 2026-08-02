@@ -68,6 +68,7 @@ test('connects a model provider without persisting its API key', async ({ page }
 
 test('loads graph workspaces only after their tabs are selected', async ({ page }) => {
   await page.goto('/')
+  await page.getByRole('button', { name: '浅色' }).click()
 
   await expect(page.locator('.topology-container')).toHaveCount(0)
 
@@ -77,6 +78,16 @@ test('loads graph workspaces only after their tabs are selected', async ({ page 
   await page.getByRole('button', { name: '依赖图谱' }).click()
   await expect(page.getByText('代码架构拓扑图谱')).toBeVisible()
   await expect(page.getByText('AST 降级模式')).toBeVisible()
+
+  const topologyToolbar = page.locator('.topology-container .topology-toolbar')
+  const topologyTitle = topologyToolbar.locator('.title')
+  const fallbackBadge = topologyToolbar.locator('.topology-badge.fallback')
+  const refreshButton = topologyToolbar.locator('.refresh-btn')
+  await expect(topologyToolbar).toHaveCSS('background-color', 'rgb(247, 249, 253)')
+  await expect(topologyTitle).toHaveCSS('color', 'rgb(66, 82, 106)')
+  await expect(fallbackBadge).toHaveCSS('background-color', 'rgb(180, 83, 9)')
+  await expect(refreshButton).toHaveCSS('background-color', 'rgb(237, 241, 248)')
+  await expect(refreshButton).toHaveCSS('color', 'rgb(66, 82, 106)')
 })
 
 test('renders a dynamic DAG and authoritative budget from the SSE event chain', async ({

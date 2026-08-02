@@ -1568,28 +1568,8 @@ select:focus-visible {
   color: var(--text-soft);
 }
 
-.topology-container,
 .vue-flow {
   background: var(--surface-muted) !important;
-}
-
-.topology-container .topology-toolbar {
-  background: var(--surface-muted);
-  border-color: var(--border);
-}
-
-.topology-container .topology-toolbar .title {
-  color: var(--text-soft);
-}
-
-.topology-container .refresh-btn {
-  background: var(--surface-strong);
-  color: var(--text-soft);
-}
-
-.topology-container .refresh-btn:hover {
-  background: var(--primary-soft);
-  color: var(--primary);
 }
 
 .dag-node-pending {
