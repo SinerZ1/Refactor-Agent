@@ -232,7 +232,7 @@ def call_architect(
     state: State,
     config: RunnableConfig,
     *,
-    model_resolver: ModelResolver = get_llm_from_config,
+    model_resolver: ModelResolver | None = None,
 ):
     messages = state["messages"]
     # 确保首条消息前有 架构师 的 System 指令
@@ -244,7 +244,8 @@ def call_architect(
         messages,
         fallback_prompt="请根据上述上下文，继续分析架构设计与重构方案。",
     )
-    llm = model_resolver(config).bind_tools(architect_tools)
+    resolver = model_resolver or get_llm_from_config
+    llm = resolver(config).bind_tools(architect_tools)
     response, result = invoke_budgeted_agent(
         state,
         config,
@@ -268,7 +269,7 @@ def call_developer(
     state: State,
     config: RunnableConfig,
     *,
-    model_resolver: ModelResolver = get_llm_from_config,
+    model_resolver: ModelResolver | None = None,
 ):
     messages = state["messages"]
     active_task_id = state.get("active_task_id")
@@ -301,7 +302,8 @@ def call_developer(
         clean_messages,
         fallback_prompt="请依据上述架构师的方案和指导意见，开始编写重构代码。",
     )
-    llm = model_resolver(config).bind_tools(developer_tools)
+    resolver = model_resolver or get_llm_from_config
+    llm = resolver(config).bind_tools(developer_tools)
     _, result = invoke_budgeted_agent(
         state,
         config,
@@ -397,7 +399,7 @@ def call_reviewer(
     state: State,
     config: RunnableConfig,
     *,
-    model_resolver: ModelResolver = get_llm_from_config,
+    model_resolver: ModelResolver | None = None,
 ):
     messages = state["messages"]
     # Reviewer 不能读取文件；由 Graph State 注入写工具产生的可验证差异。
@@ -423,7 +425,8 @@ def call_reviewer(
         clean_messages,
         fallback_prompt="请根据上述变更清单和审查标准给出审查结论。",
     )
-    llm = model_resolver(config).bind_tools(reviewer_tools)
+    resolver = model_resolver or get_llm_from_config
+    llm = resolver(config).bind_tools(reviewer_tools)
     _, result = invoke_budgeted_agent(
         state,
         config,
