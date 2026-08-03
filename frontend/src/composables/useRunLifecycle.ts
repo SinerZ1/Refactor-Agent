@@ -121,16 +121,29 @@ export function useRunLifecycle(options: RunLifecycleOptions) {
     const requestThread = options.threadId.value
     const token = options.sessionToken.value
     if (!runId || !requestThread || !token) return
-    const response = await fetch(
-      `${API_BASE_URL}/api/sessions/${encodeURIComponent(requestThread)}/runs/${encodeURIComponent(runId)}`,
-      { headers: { 'X-Session-Token': token } },
-    )
+    let response: Response
+    try {
+      response = await fetch(
+        `${API_BASE_URL}/api/sessions/${encodeURIComponent(requestThread)}/runs/${encodeURIComponent(runId)}`,
+        { headers: { 'X-Session-Token': token } },
+      )
+    } catch {
+      if (generation === refreshGeneration) options.onError('无法读取运行清理状态（网络错误）')
+      return
+    }
     if (generation !== refreshGeneration || response.status === 404) return
     if (!response.ok) {
       options.onError(`无法读取运行清理状态（HTTP ${response.status}）`)
       return
     }
-    const snapshot = parseRunStatusSnapshot(await response.json())
+    let payload: unknown
+    try {
+      payload = await response.json()
+    } catch {
+      if (generation === refreshGeneration) options.onError('运行清理状态响应格式无效')
+      return
+    }
+    const snapshot = parseRunStatusSnapshot(payload)
     if (generation === refreshGeneration && snapshot?.run_id === options.activeRunId.value) {
       status.value = snapshot
     }

@@ -29,6 +29,9 @@ test.beforeEach(async ({ page }) => {
       }),
     })
   })
+  await page.route('**/api/sessions/*/runs/*', async (route) => {
+    await route.fulfill({ status: 404, contentType: 'application/json', body: '{}' })
+  })
 })
 
 test('renders the refactor workspace and persists theme selection', async ({ page }) => {

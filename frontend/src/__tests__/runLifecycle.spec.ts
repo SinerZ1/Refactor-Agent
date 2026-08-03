@@ -130,4 +130,22 @@ describe('run lifecycle observability', () => {
     expect(lifecycle.status.value?.lifecycle_status).toBe('failed')
     expect(lifecycle.status.value?.apply_failure).toBeNull()
   })
+
+  it('contains malformed status responses instead of leaking an unhandled rejection', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn<() => Promise<Response>>(async () => new Response('<html>not json</html>')),
+    )
+    const onError = vi.fn<(message: string) => void>()
+    const lifecycle = useRunLifecycle({
+      activeRunId: ref('run-one'),
+      threadId: ref('thread-one'),
+      sessionToken: ref('token'),
+      onError,
+    })
+
+    await expect(lifecycle.refresh()).resolves.toBeUndefined()
+    expect(onError).toHaveBeenCalledWith('运行清理状态响应格式无效')
+    vi.unstubAllGlobals()
+  })
 })
