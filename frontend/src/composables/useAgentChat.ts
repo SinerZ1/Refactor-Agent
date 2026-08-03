@@ -2,6 +2,11 @@ import { ref } from 'vue'
 
 import type { BackendMessage, ChatMessage, ChatRole } from '../types/workspace'
 
+export interface AgentResponseHandle {
+  generation: number
+  index: number
+}
+
 const roleForSender = (sender: unknown): ChatRole => {
   if (sender === 'ReviewerAgent') return 'reviewer'
   if (sender === 'ArchitectAgent') return 'architect'
@@ -11,6 +16,7 @@ const roleForSender = (sender: unknown): ChatRole => {
 export function useAgentChat() {
   const chatMessages = ref<ChatMessage[]>([])
   const userChatInput = ref('')
+  let chatGeneration = 0
 
   const appendMessage = (role: ChatRole, text: string) => {
     chatMessages.value.push({ role, text })
@@ -22,11 +28,12 @@ export function useAgentChat() {
       'agent',
       isInitialTurn ? '正在进行首次代码分析与重构...' : '正在思考...',
     )
-    return index
+    return { generation: chatGeneration, index }
   }
 
-  const updateAgentResponse = (index: number, text: string) => {
-    const message = chatMessages.value[index]
+  const updateAgentResponse = (handle: AgentResponseHandle, text: string) => {
+    if (handle.generation !== chatGeneration) return
+    const message = chatMessages.value[handle.index]
     if (message) message.text = text
   }
 
@@ -45,6 +52,7 @@ export function useAgentChat() {
   }
 
   const resetChat = () => {
+    chatGeneration += 1
     userChatInput.value = ''
     chatMessages.value = []
   }

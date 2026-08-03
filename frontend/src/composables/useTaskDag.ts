@@ -1,4 +1,4 @@
-import { ref, shallowRef } from 'vue'
+import { shallowRef } from 'vue'
 import type { Edge, Node } from '@vue-flow/core'
 import { isRefactorPlan, type AgentEvent, type RefactorPlan } from '../types/agentEvents'
 
@@ -6,68 +6,6 @@ export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'failed' | 'b
 type BackendTaskStatus = 'pending' | 'running' | 'completed' | 'failed' | 'blocked'
 const CLOSED_ARROW_MARKER = 'arrowclosed'
 const TASK_ID_PATTERN = /^[a-z][a-z0-9_-]{0,63}$/
-
-const initialNodes: Node[] = [
-  {
-    id: 'architect_task',
-    label: '📐 架构分析与重构规划',
-    position: { x: 50, y: 180 },
-    class: 'dag-node-pending',
-    data: { status: 'pending', title: 'Architect Task' },
-  },
-  {
-    id: 'models_py',
-    label: '📦 重构 models.py (数据模型)',
-    position: { x: 320, y: 50 },
-    class: 'dag-node-pending',
-    data: { status: 'pending', file: 'models.py' },
-  },
-  {
-    id: 'calculator_py',
-    label: '🧮 重构 Calculator.py (业务计算)',
-    position: { x: 320, y: 180 },
-    class: 'dag-node-pending',
-    data: { status: 'pending', file: 'Calculator.py' },
-  },
-  {
-    id: 'services_py',
-    label: '🛠️ 重构 services.py (系统服务)',
-    position: { x: 320, y: 310 },
-    class: 'dag-node-pending',
-    data: { status: 'pending', file: 'services.py' },
-  },
-  {
-    id: 'main_py',
-    label: '🚀 重构 main.py (入口编排)',
-    position: { x: 590, y: 180 },
-    class: 'dag-node-pending',
-    data: { status: 'pending', file: 'main.py' },
-  },
-  {
-    id: 'reviewer_task',
-    label: '🛡️ Reviewer 自动化单元测试',
-    position: { x: 860, y: 180 },
-    class: 'dag-node-pending',
-    data: { status: 'pending', title: 'Reviewer Task' },
-  },
-]
-
-const initialEdges: Edge[] = [
-  ['e1', 'architect_task', 'models_py'],
-  ['e2', 'architect_task', 'calculator_py'],
-  ['e3', 'architect_task', 'services_py'],
-  ['e4', 'models_py', 'main_py'],
-  ['e5', 'calculator_py', 'main_py'],
-  ['e6', 'services_py', 'main_py'],
-  ['e7', 'main_py', 'reviewer_task'],
-].map(([id, source, target]) => ({
-  id: id!,
-  source: source!,
-  target: target!,
-  animated: false,
-  style: { stroke: '#444' },
-  markerEnd: CLOSED_ARROW_MARKER,
-}))
 
 const createEdge = (source: string, target: string): Edge => ({
   id: `plan-edge-${source}-${target}`,
@@ -88,10 +26,8 @@ const normalizeTaskPath = (value: string): string => {
 }
 
 export function useTaskDag() {
-  // 每个工作区实例复制初始值，避免 Vue Flow 对模块级模板对象的可变更新跨实例泄漏。
-  const dagNodes = shallowRef<Node[]>(structuredClone(initialNodes))
-  const dagEdges = shallowRef<Edge[]>(structuredClone(initialEdges))
-  const isDynamicDag = ref(false)
+  const dagNodes = shallowRef<Node[]>([])
+  const dagEdges = shallowRef<Edge[]>([])
 
   /**
    * 计划布局采用拓扑层级而非任务数组顺序：根任务位于 Architect 右侧，每个任务的
@@ -208,7 +144,6 @@ export function useTaskDag() {
 
     dagNodes.value = planNodes
     dagEdges.value = planEdges
-    isDynamicDag.value = true
     return true
   }
 
@@ -255,31 +190,6 @@ export function useTaskDag() {
     })
   }
 
-  const findFileTaskId = (event: AgentEvent): string | undefined => {
-    const args =
-      event.payload && typeof event.payload.args === 'object' && event.payload.args !== null
-        ? (event.payload.args as Record<string, unknown>)
-        : undefined
-    const rawPath = event.payload?.file_path ?? args?.file_path
-    if (typeof rawPath !== 'string') return undefined
-    const normalizedPath = normalizeTaskPath(rawPath)
-    const exactMatch = dagNodes.value.find(
-      (node) => normalizeTaskPath(String(node.data?.file ?? '')) === normalizedPath,
-    )
-    if (exactMatch) return exactMatch.id
-
-    // 旧静态图只保存文件名。兼容期允许在没有完整路径命中时按唯一 basename 回退，
-    // 动态计划始终使用完整 CodeSmells 相对路径，不会依赖这个分支。
-    const fileName = normalizedPath.split('/').pop()
-    const basenameMatches = dagNodes.value.filter(
-      (node) =>
-        normalizeTaskPath(String(node.data?.file ?? ''))
-          .split('/')
-          .pop() === fileName,
-    )
-    return basenameMatches.length === 1 ? basenameMatches[0]?.id : undefined
-  }
-
   const applyBackendTaskSnapshot = (event: AgentEvent): boolean => {
     const rawStatuses = event.payload?.task_statuses
     if (typeof rawStatuses !== 'object' || rawStatuses === null || Array.isArray(rawStatuses)) {
@@ -308,7 +218,6 @@ export function useTaskDag() {
    */
   const applyDagEvent = (event: AgentEvent) => {
     const explicitTaskId = event.task_id
-    const fileTaskId = explicitTaskId ?? findFileTaskId(event)
 
     switch (event.type) {
       case 'plan.created': {
@@ -343,26 +252,6 @@ export function useTaskDag() {
       case 'plan.failed':
         applyBackendTaskSnapshot(event)
         break
-      case 'tool.started':
-        if (!isDynamicDag.value && event.tool === 'write_code_file' && fileTaskId) {
-          updateDagNodeStatus(fileTaskId, 'in_progress')
-        } else if (!isDynamicDag.value && event.tool === 'run_unit_tests') {
-          updateDagNodeStatus('reviewer_task', 'in_progress')
-        }
-        break
-      case 'tool.completed':
-        if (!isDynamicDag.value && event.tool === 'write_code_file' && fileTaskId) {
-          updateDagNodeStatus(fileTaskId, 'completed')
-        }
-        break
-      case 'tool.failed':
-      case 'approval.rejected':
-        if (!isDynamicDag.value && event.tool === 'write_code_file' && fileTaskId) {
-          updateDagNodeStatus(fileTaskId, 'failed')
-        } else if (!isDynamicDag.value && event.tool === 'run_unit_tests') {
-          updateDagNodeStatus('reviewer_task', 'failed')
-        }
-        break
       case 'review.passed':
       case 'run.completed':
         updateDagNodeStatus('reviewer_task', 'completed')
@@ -375,19 +264,15 @@ export function useTaskDag() {
         updateDagNodeStatus('reviewer_task', 'in_progress')
         break
       case 'run.budget.exceeded':
-        if (!isDynamicDag.value || explicitTaskId === 'reviewer_task') {
-          updateDagNodeStatus(explicitTaskId ?? 'reviewer_task', 'failed')
-        }
+        if (explicitTaskId) updateDagNodeStatus(explicitTaskId, 'failed')
         break
     }
   }
 
   const resetDag = () => {
     // 新会话必须丢弃上一轮动态计划，避免旧 DAG 在 Architect 生成新计划前短暂误导用户。
-    dagNodes.value = structuredClone(initialNodes)
-    dagEdges.value = structuredClone(initialEdges)
-    isDynamicDag.value = false
-    updateDagNodeStatus('architect_task', 'in_progress')
+    dagNodes.value = []
+    dagEdges.value = []
   }
 
   return {

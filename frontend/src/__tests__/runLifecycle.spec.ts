@@ -32,7 +32,13 @@ describe('run lifecycle observability', () => {
       props: { status: snapshot({ lifecycle_status: lifecycle }) },
     })
     expect(wrapper.text()).toContain(message)
-    if (lifecycle === 'cleanup_pending') expect(wrapper.text()).not.toContain('清理已完成')
+  })
+
+  it('does not present pending cleanup as completed', () => {
+    const wrapper = mount(RunLifecycleNotice, {
+      props: { status: snapshot({ lifecycle_status: 'cleanup_pending' }) },
+    })
+    expect(wrapper.text()).not.toContain('清理已完成')
   })
 
   it('distinguishes complete and partial rollback guidance', async () => {
@@ -110,7 +116,7 @@ describe('run lifecycle observability', () => {
       activeRunId: ref('run-one'),
       threadId: ref('thread-one'),
       sessionToken: ref('token'),
-      onError: vi.fn(),
+      onError: vi.fn<(message: string) => void>(),
     })
     lifecycle.applyEvent({
       version: 1,

@@ -212,7 +212,10 @@ Neo4j 错误只记录异常类型，不输出口令。AST 模式能覆盖静态 
 - `useApprovalFlow`：审批展示、WS/HTTP 提交与恢复；
 - `useTaskDag`：计划和任务事件 reducer；
 - `useRunBudget`：用量快照；
+- `useRunLifecycle`：延迟清理与应用事务的可恢复状态投影；
 - `useModelProvider`：供应商配置与不持久化 API Key。
+
+新建/切换会话和组件卸载共用同一个 run-scope reset：取消 SSE 与审批请求、清空 DAG、聊天、日志、预算、审批和生命周期状态，并递增 SSE、WebSocket、HTTP 回调的 connection generation。每个回调在写入前同时核对 generation、会话凭据和 `run_id`；因此关闭连接前已排队的旧事件也无法重新绑定新会话。主题与模型选择属于用户级配置，不参与该重置。
 
 Agent Markdown 统一由 `renderSafeMarkdown()` 渲染，Marked 只负责语法解析，DOMPurify 负责安全 allowlist，外链再补充 `rel="noopener noreferrer"`。
 

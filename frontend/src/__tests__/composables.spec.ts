@@ -28,23 +28,29 @@ describe('workspace composables', () => {
     expect(getRuntimeModelConfig()).not.toHaveProperty('vertex_adc_path')
   })
 
-  it('updates and resets task DAG state through immutable snapshots', () => {
-    const { dagEdges, dagNodes, resetDag, updateDagNodeStatus } = useTaskDag()
-
-    updateDagNodeStatus('models_py', 'completed')
-    expect(dagNodes.value.find((node) => node.id === 'models_py')?.data.status).toBe('completed')
-    expect(dagEdges.value.find((edge) => edge.source === 'models_py')?.animated).toBe(true)
+  it('clears task DAG immediately and waits for a new authoritative plan', () => {
+    const { dagEdges, dagNodes, initializeDagFromPlan, resetDag } = useTaskDag()
+    initializeDagFromPlan({
+      version: 1,
+      summary: '旧计划',
+      tasks: [
+        {
+          id: 'old_task',
+          title: '旧任务',
+          description: '即将重置',
+          file_path: 'CodeSmells/old.py',
+          dependencies: [],
+        },
+      ],
+    })
 
     resetDag()
-    expect(dagNodes.value.find((node) => node.id === 'architect_task')?.data.status).toBe(
-      'in_progress',
-    )
-    expect(dagNodes.value.find((node) => node.id === 'models_py')?.data.status).toBe('pending')
-    expect(dagEdges.value.every((edge) => edge.animated === false)).toBe(true)
+    expect(dagNodes.value).toEqual([])
+    expect(dagEdges.value).toEqual([])
   })
 
-  it('reduces structured tool events without parsing log text', () => {
-    const { applyDagEvent, dagNodes } = useTaskDag()
+  it('does not construct a DAG from tool events or natural-language log text', () => {
+    const { applyDagEvent, dagEdges, dagNodes } = useTaskDag()
     const started = parseAgentEvent({
       version: 1,
       type: 'tool.started',
@@ -66,9 +72,9 @@ describe('workspace composables', () => {
     expect(started).not.toBeNull()
     expect(failed).not.toBeNull()
     applyDagEvent(started!)
-    expect(dagNodes.value.find((node) => node.id === 'models_py')?.data.status).toBe('in_progress')
     applyDagEvent(failed!)
-    expect(dagNodes.value.find((node) => node.id === 'models_py')?.data.status).toBe('failed')
+    expect(dagNodes.value).toEqual([])
+    expect(dagEdges.value).toEqual([])
   })
 
   it('builds a dynamic DAG from the validated Architect plan', () => {
@@ -134,10 +140,8 @@ describe('workspace composables', () => {
     expect(dagNodes.value.find((node) => node.id === 'entrypoint')?.data.status).toBe('in_progress')
 
     resetDag()
-    expect(dagNodes.value.some((node) => node.id === 'domain_models')).toBe(false)
-    expect(dagNodes.value.find((node) => node.id === 'architect_task')?.data.status).toBe(
-      'in_progress',
-    )
+    expect(dagNodes.value).toEqual([])
+    expect(dagEdges.value).toEqual([])
   })
 
   it('rejects cyclic plans before replacing the current DAG', () => {
@@ -164,17 +168,30 @@ describe('workspace composables', () => {
     }
 
     expect(initializeDagFromPlan(cyclicPlan)).toBe(false)
-    expect(dagNodes.value.some((node) => node.id === 'models_py')).toBe(true)
+    expect(dagNodes.value).toEqual([])
   })
 
   it('marks the responsible task failed when a run budget is exhausted', () => {
-    const { applyDagEvent, dagNodes } = useTaskDag()
+    const { applyDagEvent, dagNodes, initializeDagFromPlan } = useTaskDag()
+    initializeDagFromPlan({
+      version: 1,
+      summary: '预算测试',
+      tasks: [
+        {
+          id: 'budget_task',
+          title: '预算任务',
+          description: '消耗预算',
+          file_path: 'CodeSmells/budget.py',
+          dependencies: [],
+        },
+      ],
+    })
     const event = parseAgentEvent({
       version: 1,
       type: 'run.budget.exceeded',
       level: 'error',
       message: '工具调用预算耗尽',
-      task_id: 'architect_task',
+      task_id: 'budget_task',
       success: false,
       payload: {
         usage: {
@@ -196,7 +213,7 @@ describe('workspace composables', () => {
 
     expect(event).not.toBeNull()
     applyDagEvent(event!)
-    expect(dagNodes.value.find((node) => node.id === 'architect_task')?.data.status).toBe('failed')
+    expect(dagNodes.value.find((node) => node.id === 'budget_task')?.data.status).toBe('failed')
   })
 
   it('keeps dynamic DAG status aligned with authoritative task and plan events', () => {

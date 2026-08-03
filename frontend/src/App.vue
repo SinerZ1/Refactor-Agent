@@ -47,7 +47,7 @@ const {
   usage: budgetUsage,
 } = useRunBudget()
 const {
-  closeWebSocket,
+  disposeBackendSession,
   ensureBackendSession,
   reportSessionError,
   resetBackendSession,
@@ -82,7 +82,7 @@ const {
   threadId,
 })
 
-const { cancelActiveStream, isRefactoring, sendStreamRequest } = useRefactorStream({
+const { isRefactoring, resetStream, sendStreamRequest } = useRefactorStream({
   activeRunId,
   applyEvent: (event) => {
     applyDagEvent(event)
@@ -100,10 +100,7 @@ const { cancelActiveStream, isRefactoring, sendStreamRequest } = useRefactorStre
     void refreshRunLifecycle()
   },
   resetInitialTurn: () => {
-    resetChat()
-    resetDag()
-    resetRunBudget()
-    resetRunLifecycle()
+    resetRunScopeState(false)
   },
   sessionToken,
   threadId,
@@ -130,13 +127,23 @@ const handleSendChatMessage = () => {
   if (message) void sendStreamRequest(message, false)
 }
 
-const handleNewSession = async () => {
-  cancelActiveStream()
+/**
+ * 运行作用域只有这一处销毁入口：组件状态、异步审批与传输代际一起失效。
+ * 模型和主题属于用户配置，不参与 reset，因而新会话不会误删持久偏好。
+ */
+const resetRunScopeState = (cancelTransport = true) => {
+  if (cancelTransport) resetStream()
   activeRunId.value = ''
   agentLogs.value = []
   resetApproval()
   resetChat()
+  resetDag()
   resetRunBudget()
+  resetRunLifecycle()
+}
+
+const handleNewSession = async () => {
+  resetRunScopeState()
   try {
     await resetBackendSession()
   } catch (error) {
@@ -153,8 +160,8 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
-  cancelActiveStream()
-  closeWebSocket()
+  resetRunScopeState()
+  disposeBackendSession()
 })
 </script>
 

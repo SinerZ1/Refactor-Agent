@@ -1,6 +1,7 @@
 import { nextTick, ref, type Ref } from 'vue'
 
 import { API_BASE_URL } from '../api'
+import type { AgentResponseHandle } from './useAgentChat'
 import { parseAgentEvent, type AgentEvent } from '../types/agentEvents'
 import type { AgentLog } from '../types/workspace'
 
@@ -10,8 +11,8 @@ interface RefactorStreamOptions {
   sessionToken: Ref<string>
   ensureBackendSession: () => Promise<void>
   getRuntimeModelConfig: () => Record<string, unknown>
-  beginAgentResponse: (isInitialTurn: boolean) => number
-  updateAgentResponse: (index: number, text: string) => void
+  beginAgentResponse: (isInitialTurn: boolean) => AgentResponseHandle
+  updateAgentResponse: (handle: AgentResponseHandle, text: string) => void
   resetInitialTurn: () => void
   applyEvent: (event: AgentEvent) => void
   onApproval: (payload: unknown) => void
@@ -35,7 +36,13 @@ export function useRefactorStream(options: RefactorStreamOptions) {
     isRefactoring.value = false
   }
 
+  const resetStream = () => {
+    cancelActiveStream()
+    refactoredCode.value = ''
+  }
+
   const sendStreamRequest = async (payloadText: string, isInitialTurn: boolean) => {
+    const generation = ++streamGeneration
     try {
       await options.ensureBackendSession()
     } catch (error) {
@@ -46,13 +53,17 @@ export function useRefactorStream(options: RefactorStreamOptions) {
       })
       return
     }
+    if (generation !== streamGeneration) return
 
     abortController?.abort()
     const controller = new AbortController()
     abortController = controller
-    const generation = ++streamGeneration
     const requestThreadId = options.threadId.value
     const requestSessionToken = options.sessionToken.value
+    const isCurrentRequest = () =>
+      generation === streamGeneration &&
+      requestThreadId === options.threadId.value &&
+      requestSessionToken === options.sessionToken.value
     isRefactoring.value = true
 
     if (isInitialTurn) {
@@ -83,7 +94,7 @@ export function useRefactorStream(options: RefactorStreamOptions) {
 
       while (true) {
         const { value, done } = await reader.read()
-        if (generation !== streamGeneration) {
+        if (!isCurrentRequest()) {
           await reader.cancel()
           return
         }
@@ -93,11 +104,17 @@ export function useRefactorStream(options: RefactorStreamOptions) {
         const chunks = buffer.split('\n\n')
         buffer = chunks.pop() || ''
         for (const chunk of chunks) {
+          if (!isCurrentRequest()) {
+            await reader.cancel()
+            return
+          }
           if (!chunk.trim().startsWith('data: ')) continue
           try {
             const event = parseAgentEvent(JSON.parse(chunk.replace(/^data:\s*/, '')))
             if (!event) continue
+            if (!isCurrentRequest()) return
             if (event.type === 'run.started' && event.run_id) {
+              if (options.activeRunId.value && options.activeRunId.value !== event.run_id) continue
               options.activeRunId.value = event.run_id
             } else if (
               event.run_id &&
@@ -127,7 +144,7 @@ export function useRefactorStream(options: RefactorStreamOptions) {
       }
     } catch (error) {
       if (
-        generation !== streamGeneration ||
+        !isCurrentRequest() ||
         controller.signal.aborted ||
         (error instanceof DOMException && error.name === 'AbortError')
       ) {
@@ -140,10 +157,12 @@ export function useRefactorStream(options: RefactorStreamOptions) {
         '[重构失败] 无法完成此次对话，请检查后端运行状态。',
       )
     } finally {
-      if (generation === streamGeneration) {
+      if (isCurrentRequest()) {
         abortController = null
         isRefactoring.value = false
-        nextTick(options.onStreamSettled)
+        nextTick(() => {
+          if (isCurrentRequest()) options.onStreamSettled()
+        })
       }
     }
   }
@@ -152,6 +171,7 @@ export function useRefactorStream(options: RefactorStreamOptions) {
     cancelActiveStream,
     isRefactoring,
     refactoredCode,
+    resetStream,
     sendStreamRequest,
   }
 }

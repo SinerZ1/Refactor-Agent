@@ -1,4 +1,4 @@
-import { ref, type Ref } from 'vue'
+import { ref, shallowRef, type Ref } from 'vue'
 
 import { API_BASE_URL } from '../api'
 import type { BackendMessage } from '../types/workspace'
@@ -16,10 +16,12 @@ const isBackendMessage = (value: unknown): value is BackendMessage =>
 export function useBackendSession({ activeRunId, onError }: BackendSessionOptions) {
   const threadId = ref('')
   const sessionToken = ref('')
-  const socket = ref<WebSocket | null>(null)
+  const socket = shallowRef<WebSocket | null>(null)
   let messageHandler: MessageHandler = () => undefined
+  let sessionGeneration = 0
+  let disposed = false
 
-  const createBackendSession = async () => {
+  const requestBackendSession = async () => {
     const response = await fetch(`${API_BASE_URL}/api/sessions`, { method: 'POST' })
     if (!response.ok) throw new Error(`创建后端会话失败（HTTP ${response.status}）`)
 
@@ -27,26 +29,41 @@ export function useBackendSession({ activeRunId, onError }: BackendSessionOption
     if (typeof payload.thread_id !== 'string' || typeof payload.session_token !== 'string') {
       throw new Error('创建后端会话失败：响应缺少会话凭据')
     }
-    threadId.value = payload.thread_id
-    sessionToken.value = payload.session_token
+    return { threadId: payload.thread_id, sessionToken: payload.session_token }
   }
 
-  const closeWebSocket = () => {
-    socket.value?.close()
+  const detachWebSocket = () => {
+    const current = socket.value
     socket.value = null
+    if (!current) return
+    current.onmessage = null
+    current.onclose = null
+    current.onerror = null
+    current.close()
   }
 
-  const connectWebSocket = () => {
+  const connectForGeneration = (generation: number) => {
     if (!threadId.value || !sessionToken.value) return
-    closeWebSocket()
+    detachWebSocket()
 
     const apiUrl = new URL(API_BASE_URL)
     const protocol = apiUrl.protocol === 'https:' ? 'wss:' : 'ws:'
     const url = `${protocol}//${apiUrl.host}/ws/refactor/${encodeURIComponent(threadId.value)}?token=${encodeURIComponent(sessionToken.value)}`
     const nextSocket = new WebSocket(url)
     socket.value = nextSocket
+    const boundThreadId = threadId.value
+    const boundSessionToken = sessionToken.value
 
     nextSocket.onmessage = (event) => {
+      if (
+        disposed ||
+        generation !== sessionGeneration ||
+        socket.value !== nextSocket ||
+        threadId.value !== boundThreadId ||
+        sessionToken.value !== boundSessionToken
+      ) {
+        return
+      }
       try {
         const message: unknown = JSON.parse(String(event.data))
         if (!isBackendMessage(message)) return
@@ -63,9 +80,21 @@ export function useBackendSession({ activeRunId, onError }: BackendSessionOption
     nextSocket.onerror = (error) => console.error('[WebSocket] Error:', error)
   }
 
+  const connectWebSocket = () => {
+    disposed = false
+    const generation = ++sessionGeneration
+    connectForGeneration(generation)
+  }
+
   const startBackendSession = async () => {
-    await createBackendSession()
-    connectWebSocket()
+    disposed = false
+    const generation = ++sessionGeneration
+    detachWebSocket()
+    const credentials = await requestBackendSession()
+    if (disposed || generation !== sessionGeneration) return
+    threadId.value = credentials.threadId
+    sessionToken.value = credentials.sessionToken
+    connectForGeneration(generation)
   }
 
   const ensureBackendSession = async () => {
@@ -73,10 +102,25 @@ export function useBackendSession({ activeRunId, onError }: BackendSessionOption
   }
 
   const resetBackendSession = async () => {
-    closeWebSocket()
+    sessionGeneration += 1
+    detachWebSocket()
     threadId.value = ''
     sessionToken.value = ''
     await startBackendSession()
+  }
+
+  const closeWebSocket = () => {
+    sessionGeneration += 1
+    detachWebSocket()
+  }
+
+  const disposeBackendSession = () => {
+    disposed = true
+    sessionGeneration += 1
+    detachWebSocket()
+    threadId.value = ''
+    sessionToken.value = ''
+    messageHandler = () => undefined
   }
 
   const setMessageHandler = (handler: MessageHandler) => {
@@ -90,6 +134,7 @@ export function useBackendSession({ activeRunId, onError }: BackendSessionOption
   return {
     closeWebSocket,
     connectWebSocket,
+    disposeBackendSession,
     ensureBackendSession,
     reportSessionError,
     resetBackendSession,

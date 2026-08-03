@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import App from '../App.vue'
+import WorkspaceTabs from '../components/WorkspaceTabs.vue'
 
 class WebSocketStub {
   static readonly OPEN = 1
@@ -373,5 +374,222 @@ describe('App', () => {
 
     expect(wrapper.text()).not.toContain('过期运行消息')
     expect(wrapper.text()).toContain('当前运行消息')
+  })
+
+  it('resets all run-scoped panels and rejects late events without clearing user settings', async () => {
+    let sessionNumber = 0
+    const plan = {
+      version: 1,
+      summary: '旧运行计划',
+      tasks: [
+        {
+          id: 'old_task',
+          title: '旧任务',
+          description: '不应进入新会话',
+          file_path: 'CodeSmells/old.py',
+          dependencies: [],
+        },
+      ],
+    }
+    const usage = {
+      agent_steps: 2,
+      tool_calls: 1,
+      input_tokens: 100,
+      output_tokens: 20,
+      total_tokens: 120,
+      unmetered_steps: 0,
+    }
+    const limits = {
+      max_agent_steps: 2,
+      max_tool_calls: 1,
+      max_total_tokens: 120,
+      model_timeout_seconds: 30,
+    }
+    const applyFailure = {
+      code: 'workspace_apply_failure',
+      phase: 'rollback',
+      conflict_category: 'third_party_change',
+      rollback_status: 'partial',
+      requires_manual_action: true,
+      affected_file_count: 1,
+      affected_files: ['CodeSmells/old.py'],
+      recovery_available: true,
+      recovery_ids: ['recovery-safe-id'],
+      guidance: '请人工核对后再重试。',
+    }
+    const events = [
+      {
+        version: 1,
+        type: 'run.started',
+        level: 'info',
+        message: '旧运行开始',
+        run_id: 'run-old',
+      },
+      {
+        version: 1,
+        type: 'plan.created',
+        level: 'success',
+        message: '旧计划创建',
+        run_id: 'run-old',
+        payload: { plan },
+      },
+      {
+        version: 1,
+        type: 'run.budget.exceeded',
+        level: 'error',
+        message: '旧预算耗尽',
+        run_id: 'run-old',
+        payload: { usage, limits, reason: '旧预算耗尽' },
+      },
+      {
+        version: 1,
+        type: 'workspace.apply.failed',
+        level: 'error',
+        message: '旧应用失败',
+        run_id: 'run-old',
+        payload: { apply_failure: applyFailure },
+      },
+      {
+        version: 1,
+        type: 'run.lifecycle.updated',
+        level: 'error',
+        message: '旧清理失败',
+        run_id: 'run-old',
+        payload: {
+          snapshot: {
+            version: 1,
+            run_id: 'run-old',
+            lifecycle_status: 'cleanup_failed',
+            terminal_status: 'failed',
+            termination_reason: 'producer_timeout',
+            workspace_retained: false,
+            cleanup_errors: ['deferred_cleanup_failed'],
+            apply_failure: applyFailure,
+          },
+        },
+      },
+      {
+        version: 1,
+        type: 'approval.waiting',
+        level: 'info',
+        message: '旧审批等待',
+        run_id: 'run-old',
+        payload: {
+          approval_id: 'approval-old',
+          type: 'aggregate_diff_approval',
+          file_path: '聚合变更（1 个文件）',
+          original_code: '',
+          refactored_code: '-old\n+new',
+          aggregate_diff: '-old\n+new',
+          changed_files: ['CodeSmells/old.py'],
+        },
+      },
+      {
+        version: 1,
+        type: 'run.lifecycle.updated',
+        level: 'error',
+        message: '旧清理终态',
+        run_id: 'run-old',
+        payload: {
+          snapshot: {
+            version: 1,
+            run_id: 'run-old',
+            lifecycle_status: 'cleanup_failed',
+            terminal_status: 'failed',
+            termination_reason: 'producer_timeout',
+            workspace_retained: false,
+            cleanup_errors: ['deferred_cleanup_failed'],
+            apply_failure: applyFailure,
+          },
+        },
+      },
+    ]
+    vi.mocked(fetch).mockImplementation(async (input) => {
+      const url = String(input)
+      if (url.endsWith('/api/sessions')) {
+        sessionNumber += 1
+        return new Response(
+          JSON.stringify({
+            thread_id: `session_${sessionNumber}`,
+            session_token: `token_${sessionNumber}`,
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        )
+      }
+      if (url.endsWith('/api/refactor/stream')) {
+        return new Response(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(''), {
+          status: 200,
+          headers: { 'Content-Type': 'text/event-stream' },
+        })
+      }
+      if (url.includes('/runs/')) return new Response('', { status: 404 })
+      return new Response(
+        JSON.stringify({ available: false, message: '未找到有效 ADC 凭据文件' }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      )
+    })
+    wrapper = mountApp()
+    await flushPromises()
+    const darkButton = wrapper
+      .findAll('.theme-option')
+      .find((button) => button.text().includes('深色'))!
+    await darkButton.trigger('click')
+    const modelInput = wrapper.get('input[list="available-model-options"]')
+    await modelInput.setValue('keep-this-model')
+
+    await wrapper.get('.initial-btn').trigger('click')
+    await flushPromises()
+    const workspace = wrapper.findComponent(WorkspaceTabs)
+    expect((workspace.props('nodes') as unknown[]).length).toBeGreaterThan(0)
+    expect(wrapper.text()).toContain('旧预算耗尽')
+    expect(wrapper.text()).toContain('清理失败')
+    expect(wrapper.text()).toContain('未能完整恢复')
+    expect(wrapper.text()).toContain('最终聚合变更确认')
+    const oldSocket = WebSocketStub.instances[0]!
+    const queuedOldMessage = oldSocket.onmessage!
+
+    await wrapper.get('.new-session-btn').trigger('click')
+    await flushPromises()
+    expect(workspace.props('nodes')).toEqual([])
+    expect(workspace.props('edges')).toEqual([])
+    expect(workspace.props('budgetUsage')).toBeNull()
+    expect(workspace.props('runStatus')).toBeNull()
+    expect(wrapper.find('.modal-overlay').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('旧预算耗尽')
+    expect(wrapper.text()).not.toContain('未能完整恢复')
+
+    queuedOldMessage({
+      data: JSON.stringify({
+        type: 'approval_request',
+        run_id: 'run-old',
+        payload: {
+          approval_id: 'late-old',
+          file_path: '旧审批',
+          original_code: 'old',
+          refactored_code: 'new',
+        },
+      }),
+    } as MessageEvent)
+    expect(wrapper.find('.modal-overlay').exists()).toBe(false)
+
+    const newSocket = WebSocketStub.instances[1]!
+    newSocket.onmessage?.({
+      data: JSON.stringify({
+        type: 'chatroom_message',
+        run_id: 'run-new',
+        sender: 'CoderAgent',
+        content: '新会话消息',
+      }),
+    } as MessageEvent)
+    await wrapper.vm.$nextTick()
+    expect(wrapper.text()).toContain('新会话消息')
+    expect(wrapper.get('.app-container').attributes('data-theme')).toBe('dark')
+    expect(modelInput.element).toHaveProperty('value', 'keep-this-model')
+
+    await wrapper.get('.new-session-btn').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('.session-id').text()).toBe('session_3')
+    expect(wrapper.findAll('.log-item.error')).toHaveLength(0)
+    expect(workspace.props('nodes')).toEqual([])
   })
 })

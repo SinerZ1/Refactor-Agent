@@ -34,6 +34,8 @@ export function useApprovalFlow({
 }: ApprovalFlowOptions) {
   const approvalPayload = ref<ApprovalPayload | null>(null)
   const isApprovalModalOpen = ref(false)
+  let flowGeneration = 0
+  let pendingController: AbortController | null = null
 
   const openApproval = (value: unknown, invalidMessage: string) => {
     const payload = parseApprovalPayload(value)
@@ -68,6 +70,7 @@ export function useApprovalFlow({
 
   const submitApprovalDecision = async (approved: boolean) => {
     if (!approvalPayload.value) return
+    const generation = flowGeneration
     if (socket.value?.readyState === WebSocket.OPEN) {
       socket.value.send(
         JSON.stringify({
@@ -79,10 +82,16 @@ export function useApprovalFlow({
       return
     }
 
+    pendingController?.abort()
+    const controller = new AbortController()
+    pendingController = controller
+    const requestThreadId = threadId.value
+    const requestToken = sessionToken.value
     const response = await fetch(
       `${API_BASE_URL}/api/sessions/${encodeURIComponent(threadId.value)}/approval`,
       {
         method: 'POST',
+        signal: controller.signal,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           session_token: sessionToken.value,
@@ -91,11 +100,19 @@ export function useApprovalFlow({
         }),
       },
     )
+    if (
+      generation !== flowGeneration ||
+      requestThreadId !== threadId.value ||
+      requestToken !== sessionToken.value
+    ) {
+      return
+    }
     if (!response.ok) {
       const payload = (await response.json().catch(() => ({}))) as { detail?: string }
       throw new Error(payload.detail || `审批提交失败（HTTP ${response.status}）`)
     }
     isApprovalModalOpen.value = false
+    pendingController = null
     await onResume()
   }
 
@@ -103,11 +120,15 @@ export function useApprovalFlow({
     try {
       await submitApprovalDecision(approved)
     } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') return
       onError(error instanceof Error ? error.message : '审批提交失败')
     }
   }
 
   const resetApproval = () => {
+    flowGeneration += 1
+    pendingController?.abort()
+    pendingController = null
     approvalPayload.value = null
     isApprovalModalOpen.value = false
   }
