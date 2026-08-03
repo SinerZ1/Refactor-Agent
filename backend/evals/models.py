@@ -1,11 +1,18 @@
 import json
+import re
 from collections.abc import Mapping, Sequence
 from typing import Any, Protocol, cast
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 from langchain_core.runnables import RunnableConfig
 
-from .schema import EvaluationScenario, ModelOutcome
+from .schema import EvaluationScenario, ModelOutcome, ScriptStep
 
 
 class EvaluationModel(Protocol):
@@ -15,33 +22,127 @@ class EvaluationModel(Protocol):
 
 
 class ScriptedFakeModel:
-    """完全离线的确定性模型替身。
+    """实现生产模型最小协议的确定性脚本替身。
 
-    fake model 的职责是重放预先审查过的控制面轨迹，而不是伪装成真实 LLM 质量。
-    这样评测运行器、指标公式和安全终态可以在 CI 中稳定回归；模型推理质量则由显式
-    ``live`` 模式测量。
+    构造函数只接受 ``script``，类型边界上就无法看到场景 ``expected``。每次调用都
+    校验角色、任务、重试、工具轮次、图阶段与工具 allowlist；路由多走或少走一步均
+    会立刻暴露为模型错误，而不是返回通用成功。
     """
 
-    name = "scripted-fake-model-v1"
+    name = "scripted-control-plane-v2"
 
-    def evaluate(self, scenario: EvaluationScenario) -> ModelOutcome:
-        expected = scenario.expected
-        return ModelOutcome(
-            terminal_status=expected.terminal_status,
-            planned_files=expected.planned_files,
-            modified_files=expected.modified_files,
-            applied_files=expected.applied_files,
-            review_results=expected.review_results,
-            retry_count=expected.retry_count,
-            tool_calls=scenario.fake_tool_calls,
-            input_tokens=scenario.fake_input_tokens,
-            output_tokens=scenario.fake_output_tokens,
-            tests_passed=expected.tests_passed,
-            approval_requested=expected.approval_requested,
-            approval_granted=expected.approval_granted,
-            safety_blocked=expected.safety_blocked,
-            budget_exceeded=expected.budget_exceeded,
+    def __init__(self, script: tuple[ScriptStep, ...]) -> None:
+        self._script = script
+        self._cursor = 0
+        self._role = ""
+        self._allowed_tools: frozenset[str] = frozenset()
+        self._completed_rounds: dict[tuple[str, str | None], int] = {}
+        self._tool_rounds: dict[tuple[str, str | None, int], int] = {}
+
+    def bind_tools(self, tools: Sequence[Any]):
+        names = frozenset(str(tool.name) for tool in tools)
+        role_by_tools = {
+            frozenset(
+                {"read_code_file", "search_symbol_definition", "query_neo4j_topology"}
+            ): "architect",
+            frozenset(
+                {"read_code_file", "write_code_file", "search_symbol_definition"}
+            ): "developer",
+            frozenset({"run_unit_tests"}): "reviewer",
+        }
+        role = role_by_tools.get(names)
+        if role is None:
+            raise AssertionError(f"脚本模型收到未知工具集合: {sorted(names)}")
+        self._role = role
+        self._allowed_tools = names
+        return self
+
+    @staticmethod
+    def _task_id(messages: Sequence[BaseMessage]) -> str | None:
+        for message in reversed(messages):
+            if not isinstance(message, HumanMessage):
+                continue
+            content = str(message.content)
+            match = re.search(r"^任务 ID: ([a-z0-9_-]+)$", content, re.MULTILINE)
+            if match:
+                return match.group(1)
+        return None
+
+    def invoke(self, messages: Sequence[BaseMessage]) -> AIMessage:
+        if self._cursor >= len(self._script):
+            raise AssertionError("控制面触发了脚本未声明的模型调用")
+        step = self._script[self._cursor]
+        task_id = self._task_id(messages) if self._role == "developer" else None
+        key = (self._role, task_id)
+        retry_count = self._completed_rounds.get(key, 0)
+        round_key = (self._role, task_id, retry_count)
+        tool_round = self._tool_rounds.get(round_key, 0)
+        last_protocol_message = next(
+            (
+                message
+                for message in reversed(messages)
+                if isinstance(message, (AIMessage, ToolMessage))
+            ),
+            None,
         )
+        phase = (
+            "after_tool"
+            if isinstance(last_protocol_message, ToolMessage)
+            else "decision"
+        )
+        actual = (self._role, task_id, retry_count, tool_round, phase)
+        expected = (
+            step.role,
+            step.task_id,
+            step.retry_count,
+            step.tool_round,
+            step.phase,
+        )
+        if actual != expected:
+            raise AssertionError(
+                "脚本调用上下文不匹配: "
+                f"actual={actual!r}, expected={expected!r}, index={self._cursor}"
+            )
+
+        tool_calls = []
+        for index, call in enumerate(step.tool_calls):
+            if call.name not in self._allowed_tools:
+                raise AssertionError(
+                    f"{step.role} 脚本尝试调用未绑定工具 {call.name!r}"
+                )
+            tool_calls.append(
+                {
+                    "name": call.name,
+                    "args": dict(call.args),
+                    "id": f"eval-call-{self._cursor}-{index}",
+                    "type": "tool_call",
+                }
+            )
+
+        self._cursor += 1
+        if tool_calls:
+            self._tool_rounds[round_key] = tool_round + 1
+        else:
+            self._completed_rounds[key] = retry_count + 1
+        return AIMessage(
+            content=step.content,
+            tool_calls=tool_calls,
+            usage_metadata={
+                "input_tokens": step.input_tokens,
+                "output_tokens": step.output_tokens,
+                "total_tokens": step.input_tokens + step.output_tokens,
+            },
+        )
+
+    @property
+    def consumed_count(self) -> int:
+        return self._cursor
+
+    def assert_consumed(self) -> None:
+        if self._cursor != len(self._script):
+            raise AssertionError(
+                f"脚本未消费完: consumed={self._cursor}, total={len(self._script)}"
+            )
 
 
 def _token_usage(message: AIMessage) -> tuple[int, int]:
@@ -152,6 +253,7 @@ class LiveEvaluationModel:
             "approval_rejected",
             "test_failure",
             "budget_exceeded",
+            "workspace_conflict",
         }
         if status not in allowed:
             raise ValueError("真实模型返回了未知 terminal_status")
@@ -173,4 +275,6 @@ class LiveEvaluationModel:
             approval_granted=approval_granted,
             safety_blocked=bool(raw.get("safety_blocked")),
             budget_exceeded=bool(raw.get("budget_exceeded")),
+            plan_status="live_judgement",
+            workspace_cleaned=False,
         )

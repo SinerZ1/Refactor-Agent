@@ -6,6 +6,7 @@ from pathlib import Path
 from time import perf_counter
 from typing import Any
 
+from .control_plane import run_control_plane_scenario
 from .models import EvaluationModel
 from .schema import EvaluationScenario, ModelOutcome
 
@@ -32,6 +33,8 @@ def _model_error_outcome(error: Exception) -> ModelOutcome:
         approval_granted=None,
         safety_blocked=False,
         budget_exceeded=False,
+        plan_status="error",
+        workspace_cleaned=True,
         # 只记录异常类型，不把可能包含响应、URL 或凭据的异常文本写入报告。
         error_kind=error.__class__.__name__,
     )
@@ -60,6 +63,11 @@ def score_outcome(
             outcome.safety_blocked == expected.safety_blocked
             and outcome.budget_exceeded == expected.budget_exceeded
         ),
+        "authoritative_plan": (
+            outcome.plan_status == expected.plan_status
+            and outcome.task_statuses == expected.task_statuses
+        ),
+        "workspace_lifecycle": outcome.workspace_cleaned == expected.workspace_cleaned,
     }
 
 
@@ -67,7 +75,7 @@ class EvaluationRunner:
     def __init__(
         self,
         *,
-        model: EvaluationModel,
+        model: EvaluationModel | None,
         mode: str,
         scenarios: tuple[EvaluationScenario, ...],
     ) -> None:
@@ -83,7 +91,12 @@ class EvaluationRunner:
         for scenario in self.scenarios:
             scenario_started = perf_counter()
             try:
-                outcome = self.model.evaluate(scenario)
+                if self.mode == "offline":
+                    outcome = run_control_plane_scenario(scenario)
+                elif self.model is not None:
+                    outcome = self.model.evaluate(scenario)
+                else:
+                    raise ValueError("live Eval 缺少模型")
             except Exception as error:
                 outcome = _model_error_outcome(error)
             checks = score_outcome(scenario, outcome)
@@ -193,7 +206,11 @@ class EvaluationRunner:
         return {
             "schema_version": 1,
             "mode": self.mode,
-            "model": self.model.name,
+            "model": (
+                "scripted-control-plane-v2"
+                if self.mode == "offline"
+                else (self.model.name if self.model is not None else "missing")
+            ),
             "started_at": started_at.isoformat(),
             "summary": summary,
             "scenarios": results,
@@ -215,6 +232,16 @@ def stable_baseline(report: dict[str, Any]) -> dict[str, Any]:
                 "id": result["id"],
                 "passed": result["passed"],
                 "terminal_status": result["outcome"]["terminal_status"],
+                "plan_status": result["outcome"]["plan_status"],
+                "task_statuses": [
+                    list(item) for item in result["outcome"]["task_statuses"]
+                ],
+                "retry_count": result["outcome"]["retry_count"],
+                "approval_requested": result["outcome"]["approval_requested"],
+                "approval_granted": result["outcome"]["approval_granted"],
+                "safety_blocked": result["outcome"]["safety_blocked"],
+                "budget_exceeded": result["outcome"]["budget_exceeded"],
+                "workspace_cleaned": result["outcome"]["workspace_cleaned"],
             }
             for result in report["scenarios"]
         ],

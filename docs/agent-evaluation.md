@@ -16,10 +16,12 @@ Refactor-Agent 的 Eval 将“确定性控制面是否正确”与“真实模�
 
 | 模式 | 模型 | 网络/费用 | 用途 |
 | --- | --- | --- | --- |
-| `offline` | `scripted-fake-model-v1` | 无 | CI、回归、基准比较 |
+| `offline` | `scripted-control-plane-v2` | 无 | CI、生产控制面回归、基准比较 |
 | `live` | 显式供应商与模型 | 可能有 | 可选推理质量抽样 |
 
-离线模式包含 24 个固定场景和 192 个行为检查。场景定义在 `backend/evals/scenarios.py`，执行器位于 `backend/evals/runner.py`，基准位于 `backend/evals/baselines/offline.json`。
+离线模式包含 21 个固定生产控制面场景和 210 个行为检查。场景把 `input`、`script` 与 `expected` 分开定义；执行器位于 `backend/evals/control_plane.py` 与 `backend/evals/runner.py`，基准位于 `backend/evals/baselines/offline.json`。
+
+scripted model 不实现“根据场景生成结果”的接口，只实现生产模型适配器所需的 `bind_tools()` / `invoke()` 最小协议。`backend/agent/workflow.py` 的唯一图工厂把同一 Architect、Developer、Reviewer 节点、ToolNode、scheduler、条件边、证据门禁、工作区事务和 HITL 编译成隔离的 MemorySaver 图；Eval 只注入模型、测试进程、临时源码根与不可用基础设施。模型构造函数无法获得 `expected`，实际结果只在图运行结束后从 Graph State、`plan.*` / `task.*` 事件、Reviewer 证据、interrupt 和 apply 状态采集。
 
 ## 3. 场景分层
 
@@ -37,21 +39,21 @@ Refactor-Agent 的 Eval 将“确定性控制面是否正确”与“真实模�
 
 ## 4. 当前基准
 
-基准版本：schema 1，模型 `scripted-fake-model-v1`。
+基准版本：schema 1，模型 `scripted-control-plane-v2`。
 
 | 指标 | 值 | 解读 |
 | --- | ---: | --- |
-| 场景数 | 24 | 固定离线集合 |
-| 场景通过 | 24（100%） | 全部达到预期终态 |
-| 行为检查 | 192/192（100%） | 所有结构化断言通过 |
-| 首次审查成功率 | 77.78% | 衡量无 Reviewer 重试的比例 |
-| 最终成功率 | 62.50% | 其余场景包含故意失败/阻断/拒绝 |
-| 平均重试 | 0.25 | 每场景平均重试次数 |
-| 工具调用数 | 136 | 全集合的白名单工具调用 |
-| 输入 Token | 21,190 | 脚本模型的统一计量 |
-| 输出 Token | 6,030 | 脚本模型的统一计量 |
-| 总 Token | 27,220 | 预算与趋势比较用 |
-| HITL 拒绝率 | 11.76% | 集合内预设拒绝比例 |
+| 场景数 | 21 | 固定生产控制面集合 |
+| 场景通过 | 21（100%） | 全部达到预期终态 |
+| 行为检查 | 210/210（100%） | 所有结构化断言通过 |
+| 首次审查成功率 | 64.29% | 衡量无 Reviewer 重试的比例 |
+| 最终成功率 | 38.10% | 其余场景包含故意失败/阻断/拒绝/冲突 |
+| 平均重试 | 0.4286 | 每场景平均重试次数 |
+| 工具调用数 | 55 | 生产 ToolNode 执行的白名单工具调用 |
+| 输入 Token | 15,500 | 脚本消息的确定性计量 |
+| 输出 Token | 6,040 | 脚本消息的确定性计量 |
+| 总 Token | 21,540 | 预算与趋势比较用 |
+| HITL 拒绝率 | 9.09% | 集合内预设拒绝比例 |
 | 安全策略阻断率 | 100% | 预期攻击全部被阻断 |
 | 模型错误数 | 0 | 无非预期适配器错误 |
 
@@ -83,6 +85,14 @@ venv\Scripts\python.exe -m evals.run --mode offline `
 ```
 
 单场景运行不会被错误地当成完整基准更新。
+
+有意改变控制面语义并完成逐场景审核后，必须显式更新基准：
+
+```powershell
+venv\Scripts\python.exe -m evals.run --mode offline --update-baseline
+```
+
+默认命令只比较基准且漂移时返回非零，绝不会覆盖基准；`--update-baseline` 不能与 live 或单场景运行合用。
 
 ## 6. 可选 live Eval
 
@@ -142,7 +152,7 @@ venv\Scripts\python.exe -m evals.run --mode live `
 
 ## 9. 指标限制与后续方向
 
-- scripted fake model 衡量控制面可重复性，不衡量自然语言泛化。
+- scripted fake model 驱动真实控制面并衡量其可重复性，不衡量自然语言泛化。
 - 当前集合规模适合 PR 回归，不构成统计显著的模型排行榜。
 - Token 是统一脚本计量，可比较回归趋势，但不等同于每个供应商的账单。
 - 首次审查成功率会受到场景中“故意要求重试”的占比影响。

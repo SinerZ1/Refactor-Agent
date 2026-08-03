@@ -18,11 +18,15 @@ from .workspace import cleanup_run_workspace
 __all__ = ["app_graph", "simple_refactor", "stream_refactor"]
 
 
-def _cleanup_checkpoint_workspace(run_config: RunnableConfig) -> None:
+def _cleanup_checkpoint_workspace(
+    run_config: RunnableConfig,
+    *,
+    graph: Any = app_graph,
+) -> None:
     """异常边界的最后防线；正常终态由显式图节点负责清理并记录状态。"""
 
     try:
-        failed_state = app_graph.get_state(run_config)
+        failed_state = graph.get_state(run_config)
         workspace_id = failed_state.values.get("workspace_id")
         if workspace_id:
             cleanup_run_workspace(str(workspace_id))
@@ -79,6 +83,7 @@ def stream_refactor(
     ws_callback: Callable[[str, str, str], Coroutine[Any, Any, Any]] | None = None,
     main_loop: asyncio.AbstractEventLoop | None = None,
     cancel_event: threading.Event | None = None,
+    graph: Any | None = None,
 ) -> Iterator[AgentEvent]:
     """
     使用 LangGraph 状态图执行多轮对话，并输出版本化结构事件。
@@ -87,6 +92,8 @@ def stream_refactor(
     避免浏览器理解 ToolMessage、节点名或提示词文本。它是 Graph State 与 UI
     之间的反腐层（Anti-Corruption Layer），后续替换图实现也不会污染前端。
     """
+    # Eval 可注入由生产图工厂创建的隔离实例；事件反腐层与生产 API 继续共用。
+    runtime_graph = graph or app_graph
     # 构造配置，如果传入了更丰富的运行时配置，在这里进行 merge
     run_config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
     if config:
@@ -102,7 +109,7 @@ def stream_refactor(
         "重构工作流已启动",
         node="workflow",
     )
-    current_state = app_graph.get_state(run_config)
+    current_state = runtime_graph.get_state(run_config)
     active_plan: RefactorPlan | None = current_state.values.get("refactor_plan")
     active_task_id: str | None = current_state.values.get("active_task_id")
     task_statuses: dict[str, str] = dict(current_state.values.get("task_statuses", {}))
@@ -179,7 +186,7 @@ def stream_refactor(
 
     try:
         # 传入初始消息字典、多轮追问消息或恢复 Command 进行流式迭代
-        for chunk in app_graph.stream(
+        for chunk in runtime_graph.stream(
             stream_input,
             run_config,
             stream_mode="updates",
@@ -659,7 +666,7 @@ def stream_refactor(
                         node="workflow",
                     )
     except Exception as e:
-        _cleanup_checkpoint_workspace(run_config)
+        _cleanup_checkpoint_workspace(run_config, graph=runtime_graph)
         yield make_agent_event(
             "run.failed",
             f"重构工作流运行失败: {e!s}",

@@ -1,8 +1,9 @@
 import argparse
+import json
 import sys
 from pathlib import Path
 
-from .models import EvaluationModel, LiveEvaluationModel, ScriptedFakeModel
+from .models import EvaluationModel, LiveEvaluationModel
 from .reporting import write_reports
 from .runner import EvaluationRunner, baseline_drift
 from .scenarios import SCENARIOS, scenario_by_id
@@ -21,6 +22,11 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("offline", "live"),
         default="offline",
         help="offline 不调用 API；live 会显式调用真实模型并可能产生费用。",
+    )
+    parser.add_argument(
+        "--update-baseline",
+        action="store_true",
+        help="显式审核后更新完整离线稳定基准；不能与单场景或 live 模式合用。",
     )
     parser.add_argument(
         "--output-dir",
@@ -59,10 +65,12 @@ def _selected_scenarios(ids: list[str]):
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.update_baseline and (args.mode != "offline" or args.scenario):
+        raise SystemExit("--update-baseline 只允许用于完整 offline 评测")
     scenarios = _selected_scenarios(args.scenario)
-    model: EvaluationModel
+    model: EvaluationModel | None
     if args.mode == "offline":
-        model = ScriptedFakeModel()
+        model = None
     else:
         if not args.provider or not args.model:
             raise SystemExit("live 模式必须显式提供 --provider 和 --model")
@@ -89,6 +97,16 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Markdown 报告: {markdown_path}")
 
     if args.mode == "offline" and not args.scenario and not args.skip_baseline_check:
+        if args.update_baseline:
+            from .runner import stable_baseline
+
+            DEFAULT_BASELINE.write_text(
+                json.dumps(stable_baseline(report), ensure_ascii=False, indent=2)
+                + "\n",
+                encoding="utf-8",
+            )
+            print(f"离线稳定基准已显式更新: {DEFAULT_BASELINE}")
+            return 0 if summary["model_error_count"] == 0 else 1
         drift = baseline_drift(report, DEFAULT_BASELINE)
         if drift:
             print("离线基准检查失败：")

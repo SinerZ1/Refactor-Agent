@@ -1,7 +1,10 @@
 import os
+from collections.abc import Callable
+from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 from dotenv import load_dotenv
+from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
@@ -21,6 +24,7 @@ from .nodes import (
     finalize_plan_failure_node,
     finalize_review_failure_node,
     finalize_review_success_node,
+    get_llm_from_config,
     reviewer_protocol_retry_node,
 )
 from .scheduler import complete_active_task_node, schedule_next_task_node
@@ -36,8 +40,10 @@ from .workspace import (
     route_workspace_preparation,
 )
 
-# 确保在工作流定义与 checkpointer 初始化前加载环境变量
-load_dotenv()
+# 离线 Eval 在导入生产图工厂时显式禁止读取 .env 与探测基础设施。生产服务仍沿用
+# 既有环境加载语义；该进程级开关只在 Eval 模块导入的窄窗口存在。
+if os.getenv("REFACTOR_OFFLINE_EVAL_IMPORT") != "1":
+    load_dotenv()
 
 _checkpointer_health = {
     "status": "degraded",
@@ -54,111 +60,120 @@ _checkpointer_health = {
 # 都会把当前的 Graph State 快照（Checkpoint）落地保存，支持异步精准唤醒。
 # ============================================================
 
-# 构建状态图
-workflow = StateGraph(State)
 
-# 注册所有执行节点
-workflow.add_node("architect", call_architect)
-workflow.add_node("developer", call_developer)
-workflow.add_node("reviewer", call_reviewer)
-workflow.add_node("schedule_task", schedule_next_task_node)
-workflow.add_node("complete_task", complete_active_task_node)
-workflow.add_node("developer_retry", developer_retry_node)
-workflow.add_node("reviewer_protocol_retry", reviewer_protocol_retry_node)
-workflow.add_node("finalize_budget_failure", finalize_budget_failure_node)
-workflow.add_node("finalize_plan_failure", finalize_plan_failure_node)
-workflow.add_node("finalize_review_success", finalize_review_success_node)
-workflow.add_node("finalize_review_failure", finalize_review_failure_node)
-# LangGraph 1.0 的 StateGraph 泛型存根会把新增的精确 ``State -> dict`` 节点
-# 误推断为 ``Never``；运行时仍由已声明的 State schema 校验输入输出。
-workflow.add_node(
-    "initialize_workspace",
-    initialize_workspace_node,  # type: ignore[arg-type]
-)
-workflow.add_node("prepare_workspace_approval", prepare_workspace_approval_node)
-workflow.add_node("apply_workspace", apply_workspace_changes_node)
-workflow.add_node("cleanup_workspace", cleanup_workspace_node)
+def build_agent_graph(
+    *,
+    checkpointer: Any,
+    model_resolver: Callable[[Any], Any] | None = None,
+):
+    """从同一生产装配函数编译可注入依赖的 Agent 图。
 
-# 注册绑定的工具节点 (ToolNode)
-workflow.add_node("architect_tools", ToolNode(architect_tools))
-workflow.add_node("developer_tools", ToolNode(developer_tools))
-workflow.add_node("reviewer_tools", ToolNode(reviewer_tools))
+    Eval 只替换外部模型与 Checkpointer；节点、ToolNode、scheduler、条件边、HITL
+    与工作区事务仍由这里唯一装配。这样 scripted model 是生产控制面的输入端口，
+    而不是一套能读取预期答案的平行模拟器。
+    """
 
-# ============================================================
-# 设置连线与条件边关系
-# ============================================================
-workflow.add_edge(START, "initialize_workspace")
-workflow.add_edge("initialize_workspace", "architect")
+    graph = StateGraph(State)
 
-# Architect 条件边路由
-workflow.add_conditional_edges(
-    "architect",
-    route_architect,
-    {
-        "architect_tools": "architect_tools",
-        "schedule_task": "schedule_task",
-        "finalize_budget_failure": "finalize_budget_failure",
-    },
-)
-workflow.add_edge("architect_tools", "architect")
+    resolver = model_resolver or get_llm_from_config
 
-workflow.add_conditional_edges(
-    "schedule_task",
-    route_task_scheduler,
-    {
-        "developer": "developer",
-        "reviewer": "reviewer",
-        "finalize_budget_failure": "finalize_budget_failure",
-        "finalize_plan_failure": "finalize_plan_failure",
-    },
-)
+    # 闭包只替换模型解析端口，不改变节点函数内部的 Prompt、预算或工具绑定。
+    def architect_with_model(state: State, config: RunnableConfig):
+        return call_architect(state, config, model_resolver=resolver)
 
-# Developer 条件边路由
-workflow.add_conditional_edges(
-    "developer",
-    route_developer,
-    {
-        "developer_tools": "developer_tools",
-        "complete_task": "complete_task",
-        "reviewer": "reviewer",
-        "finalize_budget_failure": "finalize_budget_failure",
-    },
-)
-workflow.add_edge("developer_tools", "developer")
-workflow.add_edge("complete_task", "schedule_task")
+    def developer_with_model(state: State, config: RunnableConfig):
+        return call_developer(state, config, model_resolver=resolver)
 
-# Reviewer 打回先重开指定任务及下游，再由同一调度器选择 ready task。
-workflow.add_edge("developer_retry", "schedule_task")
+    def reviewer_with_model(state: State, config: RunnableConfig):
+        return call_reviewer(state, config, model_resolver=resolver)
 
-# Reviewer 条件边路由
-workflow.add_conditional_edges(
-    "reviewer",
-    route_reviewer,
-    {
-        "reviewer_tools": "reviewer_tools",
-        "developer_retry": "developer_retry",
-        "reviewer_protocol_retry": "reviewer_protocol_retry",
-        "finalize_budget_failure": "finalize_budget_failure",
-        "finalize_review_success": "finalize_review_success",
-        "finalize_review_failure": "finalize_review_failure",
-    },
-)
-workflow.add_edge("reviewer_tools", "reviewer")
-workflow.add_edge("reviewer_protocol_retry", "reviewer")
-workflow.add_edge("finalize_budget_failure", "cleanup_workspace")
-workflow.add_edge("finalize_plan_failure", "cleanup_workspace")
-workflow.add_edge("finalize_review_success", "prepare_workspace_approval")
-workflow.add_conditional_edges(
-    "prepare_workspace_approval",
-    route_workspace_preparation,
-    {
-        "apply_workspace": "apply_workspace",
-        "cleanup_workspace": "cleanup_workspace",
-    },
-)
-workflow.add_edge("apply_workspace", END)
-workflow.add_edge("finalize_review_failure", "cleanup_workspace")
-workflow.add_edge("cleanup_workspace", END)
+    graph.add_node("architect", architect_with_model)
+    graph.add_node("developer", developer_with_model)
+    graph.add_node("reviewer", reviewer_with_model)
+    graph.add_node("schedule_task", schedule_next_task_node)
+    graph.add_node("complete_task", complete_active_task_node)
+    graph.add_node("developer_retry", developer_retry_node)
+    graph.add_node("reviewer_protocol_retry", reviewer_protocol_retry_node)
+    graph.add_node("finalize_budget_failure", finalize_budget_failure_node)
+    graph.add_node("finalize_plan_failure", finalize_plan_failure_node)
+    graph.add_node("finalize_review_success", finalize_review_success_node)
+    graph.add_node("finalize_review_failure", finalize_review_failure_node)
+    graph.add_node(
+        "initialize_workspace",
+        initialize_workspace_node,  # type: ignore[arg-type]
+    )
+    graph.add_node("prepare_workspace_approval", prepare_workspace_approval_node)
+    graph.add_node("apply_workspace", apply_workspace_changes_node)
+    graph.add_node("cleanup_workspace", cleanup_workspace_node)
+
+    graph.add_node("architect_tools", ToolNode(architect_tools))
+    graph.add_node("developer_tools", ToolNode(developer_tools))
+    graph.add_node("reviewer_tools", ToolNode(reviewer_tools))
+
+    graph.add_edge(START, "initialize_workspace")
+    graph.add_edge("initialize_workspace", "architect")
+    graph.add_conditional_edges(
+        "architect",
+        route_architect,
+        {
+            "architect_tools": "architect_tools",
+            "schedule_task": "schedule_task",
+            "finalize_budget_failure": "finalize_budget_failure",
+        },
+    )
+    graph.add_edge("architect_tools", "architect")
+    graph.add_conditional_edges(
+        "schedule_task",
+        route_task_scheduler,
+        {
+            "developer": "developer",
+            "reviewer": "reviewer",
+            "finalize_budget_failure": "finalize_budget_failure",
+            "finalize_plan_failure": "finalize_plan_failure",
+        },
+    )
+    graph.add_conditional_edges(
+        "developer",
+        route_developer,
+        {
+            "developer_tools": "developer_tools",
+            "complete_task": "complete_task",
+            "reviewer": "reviewer",
+            "finalize_budget_failure": "finalize_budget_failure",
+        },
+    )
+    graph.add_edge("developer_tools", "developer")
+    graph.add_edge("complete_task", "schedule_task")
+    graph.add_edge("developer_retry", "schedule_task")
+    graph.add_conditional_edges(
+        "reviewer",
+        route_reviewer,
+        {
+            "reviewer_tools": "reviewer_tools",
+            "developer_retry": "developer_retry",
+            "reviewer_protocol_retry": "reviewer_protocol_retry",
+            "finalize_budget_failure": "finalize_budget_failure",
+            "finalize_review_success": "finalize_review_success",
+            "finalize_review_failure": "finalize_review_failure",
+        },
+    )
+    graph.add_edge("reviewer_tools", "reviewer")
+    graph.add_edge("reviewer_protocol_retry", "reviewer")
+    graph.add_edge("finalize_budget_failure", "cleanup_workspace")
+    graph.add_edge("finalize_plan_failure", "cleanup_workspace")
+    graph.add_edge("finalize_review_success", "prepare_workspace_approval")
+    graph.add_conditional_edges(
+        "prepare_workspace_approval",
+        route_workspace_preparation,
+        {
+            "apply_workspace": "apply_workspace",
+            "cleanup_workspace": "cleanup_workspace",
+        },
+    )
+    graph.add_edge("apply_workspace", END)
+    graph.add_edge("finalize_review_failure", "cleanup_workspace")
+    graph.add_edge("cleanup_workspace", END)
+    return graph.compile(checkpointer=checkpointer)
 
 
 def _safe_connection_url(connection_url: str) -> str:
@@ -241,5 +256,12 @@ def get_checkpointer():
     return MemorySaver()
 
 
-# 编译并导出状态图应用
-app_graph = workflow.compile(checkpointer=get_checkpointer())
+# 编译并导出状态图应用。生产与 Eval 都从同一个图工厂创建实例。离线导入不能读取
+# REDIS_URL 或发起 ping；场景本身随后各自创建独立 MemorySaver。
+app_graph = build_agent_graph(
+    checkpointer=(
+        MemorySaver()
+        if os.getenv("REFACTOR_OFFLINE_EVAL_IMPORT") == "1"
+        else get_checkpointer()
+    )
+)

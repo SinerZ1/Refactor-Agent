@@ -1,5 +1,5 @@
 import os
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
@@ -32,6 +32,8 @@ from .state import (
     review_evidence_errors,
 )
 from .tools import architect_tools, developer_tools, reviewer_tools
+
+ModelResolver = Callable[[RunnableConfig], Any]
 
 # ============================================================
 # 教学说明: 智能体节点 (Agent Nodes) 与运行时动态模型适配
@@ -226,7 +228,12 @@ def invoke_budgeted_agent(
 
 
 # 1. Architect 节点
-def call_architect(state: State, config: RunnableConfig):
+def call_architect(
+    state: State,
+    config: RunnableConfig,
+    *,
+    model_resolver: ModelResolver = get_llm_from_config,
+):
     messages = state["messages"]
     # 确保首条消息前有 架构师 的 System 指令
     if not any(
@@ -237,7 +244,7 @@ def call_architect(state: State, config: RunnableConfig):
         messages,
         fallback_prompt="请根据上述上下文，继续分析架构设计与重构方案。",
     )
-    llm = get_llm_from_config(config).bind_tools(architect_tools)
+    llm = model_resolver(config).bind_tools(architect_tools)
     response, result = invoke_budgeted_agent(
         state,
         config,
@@ -257,7 +264,12 @@ def call_architect(state: State, config: RunnableConfig):
 
 
 # 2. Developer 节点
-def call_developer(state: State, config: RunnableConfig):
+def call_developer(
+    state: State,
+    config: RunnableConfig,
+    *,
+    model_resolver: ModelResolver = get_llm_from_config,
+):
     messages = state["messages"]
     active_task_id = state.get("active_task_id")
     if active_task_id and state.get("refactor_plan") is not None:
@@ -289,7 +301,7 @@ def call_developer(state: State, config: RunnableConfig):
         clean_messages,
         fallback_prompt="请依据上述架构师的方案和指导意见，开始编写重构代码。",
     )
-    llm = get_llm_from_config(config).bind_tools(developer_tools)
+    llm = model_resolver(config).bind_tools(developer_tools)
     _, result = invoke_budgeted_agent(
         state,
         config,
@@ -381,7 +393,12 @@ def render_review_context(
     return change_context + "\n" + "\n".join(test_sections)
 
 
-def call_reviewer(state: State, config: RunnableConfig):
+def call_reviewer(
+    state: State,
+    config: RunnableConfig,
+    *,
+    model_resolver: ModelResolver = get_llm_from_config,
+):
     messages = state["messages"]
     # Reviewer 不能读取文件；由 Graph State 注入写工具产生的可验证差异。
     # 这把权限最小化与审查可观测性解耦，避免依赖 Developer 自述造成信息幻觉。
@@ -406,7 +423,7 @@ def call_reviewer(state: State, config: RunnableConfig):
         clean_messages,
         fallback_prompt="请根据上述变更清单和审查标准给出审查结论。",
     )
-    llm = get_llm_from_config(config).bind_tools(reviewer_tools)
+    llm = model_resolver(config).bind_tools(reviewer_tools)
     _, result = invoke_budgeted_agent(
         state,
         config,
