@@ -103,6 +103,7 @@ Architect 的全局 AST/Neo4j 只描述用户原始源码。Developer 查询通�
 - nonce 在同一待审批状态下幂等，做出决定后只能消费一次；
 - 旧 run 的 WebSocket 消息由 `run_id` 过滤；
 - SSE 断连会取消生产者、释放 lease 并撤销临时凭据。
+- 延迟清理与 apply 失败只进入有 TTL/容量上限的脱敏 run 状态注册表；恢复读取仍要求原会话令牌，且不保存 Prompt、源码、模型原始响应、凭据或恢复材料内容。
 
 批准行为只授权应用当前已固化的聚合 diff，不授权后续新变更。
 
@@ -167,6 +168,7 @@ Agent 消息和 WebSocket 聊天都使用统一 `renderSafeMarkdown()`：
 | 过期审批重放 | run lease、一次性 approval nonce | `test_session_registry.py` |
 | 批准内容被替换 | baseline/working/final 哈希复核 | `test_isolated_workspace.py` |
 | 多文件部分应用与 TOCTOU | 分根锁、替换前重检、同目录 `os.replace`、写入摘要绑定的安全补偿 | `test_isolated_workspace.py` |
+| SSE 断开后看不到延迟清理或部分回滚 | 认证状态快照、TTL/容量边界、安全相对路径与 recovery ID | `test_run_lifecycle.py`、`test_run_status.py`、前端 `runLifecycle.spec.ts` |
 | 可选服务故障导致绕过 | 显式 MemorySaver/AST 降级并保留门禁 | `test_app_transport.py`、`test_backend_contracts.py` |
 
 ## 13. 非目标与剩余风险

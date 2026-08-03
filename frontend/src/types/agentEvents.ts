@@ -5,6 +5,8 @@ export type AgentEventType =
   | 'run.retrying'
   | 'run.usage.updated'
   | 'run.budget.exceeded'
+  | 'run.lifecycle.updated'
+  | 'workspace.apply.failed'
   | 'plan.created'
   | 'plan.completed'
   | 'plan.failed'
@@ -54,6 +56,42 @@ export interface RunBudgetLimits {
   model_timeout_seconds: number
 }
 
+export type RunLifecycleStatus =
+  | 'running'
+  | 'waiting_for_hitl'
+  | 'cancelling'
+  | 'cleanup_pending'
+  | 'cleanup_completed'
+  | 'cleanup_failed'
+  | 'completed'
+  | 'failed'
+
+export type RollbackStatus = 'not_started' | 'complete' | 'partial'
+
+export interface WorkspaceApplyFailure {
+  code: string
+  phase: string
+  conflict_category: string
+  rollback_status: RollbackStatus
+  requires_manual_action: boolean
+  affected_file_count: number
+  affected_files: string[]
+  recovery_available: boolean
+  recovery_ids: string[]
+  guidance: string
+}
+
+export interface RunStatusSnapshot {
+  version: 1
+  run_id: string
+  lifecycle_status: RunLifecycleStatus
+  terminal_status: 'completed' | 'failed' | null
+  termination_reason: string | null
+  workspace_retained: boolean
+  cleanup_errors: string[]
+  apply_failure: WorkspaceApplyFailure | null
+}
+
 export interface AgentEvent {
   version: 1
   type: AgentEventType
@@ -75,6 +113,8 @@ const EVENT_TYPES = new Set<AgentEventType>([
   'run.retrying',
   'run.usage.updated',
   'run.budget.exceeded',
+  'run.lifecycle.updated',
+  'workspace.apply.failed',
   'plan.created',
   'plan.completed',
   'plan.failed',

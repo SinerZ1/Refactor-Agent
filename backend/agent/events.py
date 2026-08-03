@@ -8,6 +8,8 @@ AgentEventType = Literal[
     "run.retrying",
     "run.usage.updated",
     "run.budget.exceeded",
+    "run.lifecycle.updated",
+    "workspace.apply.failed",
     "plan.created",
     "plan.completed",
     "plan.failed",

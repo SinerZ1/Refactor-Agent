@@ -14,6 +14,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+from .run_status import run_statuses
+
 
 class RunTermination(StrEnum):
     COMPLETED = "completed"
@@ -112,6 +114,7 @@ class RunLifecycle:
         self._checkpoint_deleted = False
         self._lease_released = False
         self._workspace_cleaned = False
+        run_statuses.start(run_id, thread_id)
 
     @property
     def producer_alive(self) -> bool:
@@ -126,6 +129,11 @@ class RunLifecycle:
             raise ValueError("HITL 保留信息不完整")
         self.workspace_id = retention.workspace_id
         self.hitl_retention = retention
+        run_statuses.update(
+            self.run_id,
+            lifecycle_status="waiting_for_hitl",
+            workspace_retained=True,
+        )
 
     def start_producer(self, target: Callable[[], None]) -> None:
         if self._producer_thread is not None:
@@ -201,6 +209,11 @@ class RunLifecycle:
         report = CleanupReport(reason=reason)
         self._report = report
         _log_lifecycle(self.run_id, "cleanup_started", reason=reason)
+        run_statuses.update(
+            self.run_id,
+            lifecycle_status="cancelling",
+            termination_reason=reason.value,
+        )
         self.stop_requested.set()
 
         if self._producer_waiter is not None:
@@ -221,6 +234,12 @@ class RunLifecycle:
                     self._finish_after_producer(reason),
                     name=f"deferred-run-cleanup-{self.run_id}",
                 )
+                run_statuses.update(
+                    self.run_id,
+                    lifecycle_status="cleanup_pending",
+                    termination_reason=reason.value,
+                    cleanup_errors=report.cleanup_errors,
+                )
                 return report
 
         self._observe_producer(report)
@@ -235,12 +254,26 @@ class RunLifecycle:
         try:
             await asyncio.shield(self._producer_waiter)
             report = self._report or CleanupReport(reason=reason)
+            # timeout 是进入延迟回收的历史原因；producer 最终退出后不应继续把一次
+            # 成功的补偿清理标成 cleanup_failed。
+            report.cleanup_errors = [
+                error for error in report.cleanup_errors if error != "producer_timeout"
+            ]
             self._observe_producer(report)
             await self._release_owned_resources(report, retain_for_hitl=False)
             _log_lifecycle(self.run_id, "deferred_cleanup_completed")
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            report = self._report or CleanupReport(reason=reason)
+            report.cleanup_errors.append(f"deferred_cleanup:{exc.__class__.__name__}")
+            run_statuses.update(
+                self.run_id,
+                lifecycle_status="cleanup_failed",
+                terminal_status="failed",
+                termination_reason=reason.value,
+                cleanup_errors=report.cleanup_errors,
+            )
             _log_lifecycle(
                 self.run_id,
                 "cleanup_failure",
@@ -301,6 +334,13 @@ class RunLifecycle:
                 "workspace_retained_for_hitl",
                 workspace_id=self.workspace_id,
             )
+            run_statuses.update(
+                self.run_id,
+                lifecycle_status="waiting_for_hitl",
+                termination_reason=report.reason.value,
+                workspace_retained=True,
+                cleanup_errors=report.cleanup_errors,
+            )
             return
         if retain_for_hitl:
             report.cleanup_errors.append("invalid_hitl_retention")
@@ -338,6 +378,24 @@ class RunLifecycle:
             "workspace_cleaned",
             cleaned=report.workspace_cleaned,
             reason=report.reason,
+        )
+        successful_termination = report.reason in {
+            RunTermination.COMPLETED,
+            RunTermination.HITL_APPROVED,
+        }
+        run_statuses.update(
+            self.run_id,
+            lifecycle_status=(
+                "cleanup_completed" if report.cleanup_complete else "cleanup_failed"
+            ),
+            terminal_status=(
+                "completed"
+                if successful_termination and report.cleanup_complete
+                else "failed"
+            ),
+            termination_reason=report.reason.value,
+            workspace_retained=False,
+            cleanup_errors=report.cleanup_errors,
         )
 
     async def _run_once(

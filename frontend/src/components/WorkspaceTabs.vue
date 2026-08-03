@@ -4,10 +4,11 @@ import type { Edge, Node } from '@vue-flow/core'
 import '@vue-flow/core/dist/style.css'
 import '@vue-flow/core/dist/theme-default.css'
 
-import type { RunBudgetLimits, RunUsage } from '../types/agentEvents'
+import type { RunBudgetLimits, RunStatusSnapshot, RunUsage } from '../types/agentEvents'
 import type { AgentLog } from '../types/workspace'
 import AgentRunLog from './AgentRunLog.vue'
 import RunBudgetBadge from './RunBudgetBadge.vue'
+import RunLifecycleNotice from './RunLifecycleNotice.vue'
 
 const VueFlow = defineAsyncComponent(() =>
   import('@vue-flow/core').then((module) => module.VueFlow),
@@ -22,6 +23,7 @@ defineProps<{
   budgetUsage: RunUsage | null
   isBudgetExceeded: boolean
   logs: AgentLog[]
+  runStatus: RunStatusSnapshot | null
   theme: 'light' | 'dark'
 }>()
 
@@ -63,6 +65,7 @@ defineExpose({
     </div>
 
     <div v-show="activeTab === 'code'" class="tab-content flex-column log-tab">
+      <RunLifecycleNotice :status="runStatus" />
       <AgentRunLog :logs="logs" />
     </div>
 

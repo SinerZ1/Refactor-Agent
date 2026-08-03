@@ -11,6 +11,7 @@ from agent.run_lifecycle import (
     RunLifecycle,
     RunTermination,
 )
+from agent.run_status import run_statuses
 
 
 def _lifecycle(
@@ -154,12 +155,18 @@ def test_unresponsive_producer_uses_bounded_deferred_cleanup(tmp_path):
         report = await lifecycle.cleanup(RunTermination.DISCONNECTED)
 
         assert report.producer_timed_out is True
+        pending = run_statuses.get("run-test", "thread-run-test")
+        assert pending is not None
+        assert pending["lifecycle_status"] == "cleanup_pending"
         assert workspace.exists()
         assert not calls
 
         release.set()
         assert lifecycle._deferred_cleanup_task is not None
         await lifecycle._deferred_cleanup_task
+        completed = run_statuses.get("run-test", "thread-run-test")
+        assert completed is not None
+        assert completed["lifecycle_status"] == "cleanup_completed"
         assert not workspace.exists()
         assert calls["workspace"] == 1
 
@@ -185,6 +192,9 @@ def test_hitl_pause_retains_only_recoverable_workspace_and_shutdown_cleans_it(
             retain_for_hitl=True,
         )
         assert paused.workspace_retained is True
+        retained = run_statuses.get("run-test", "thread-run-test")
+        assert retained is not None
+        assert retained["lifecycle_status"] == "waiting_for_hitl"
         assert workspace.exists()
         assert calls == Counter({"credential": 1})
 
@@ -291,5 +301,8 @@ def test_cleanup_failure_does_not_skip_remaining_resources(tmp_path):
         assert calls["credential"] == 1
         assert calls["checkpoint"] == 1
         assert calls["lease"] == 1
+        failed = run_statuses.get("run-test", "thread-run-test")
+        assert failed is not None
+        assert failed["lifecycle_status"] == "cleanup_failed"
 
     asyncio.run(scenario())

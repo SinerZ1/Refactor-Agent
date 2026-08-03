@@ -343,3 +343,43 @@ def test_dynamic_task_events_carry_the_authoritative_graph_state(monkeypatch):
     assert blocked["task_id"] == "entrypoint"
     assert blocked["payload"]["task_statuses"]["entrypoint"] == "blocked"
     assert plan_failed["payload"]["plan_status"] == "failed"
+
+
+def test_stream_keeps_legacy_workspace_error_and_adds_safe_apply_failure(monkeypatch):
+    class FakeGraph:
+        def get_state(self, _config):
+            return SimpleNamespace(values={}, interrupts=())
+
+        def stream(self, *_args, **_kwargs):
+            yield {
+                "apply_workspace": {
+                    "workspace_approved": True,
+                    "workspace_applied": False,
+                    "workspace_rolled_back": False,
+                    "workspace_error": "需要人工处理",
+                    "workspace_changed_files": ["CodeSmells/example.py"],
+                    "workspace_apply_failure": {
+                        "code": "atomic_apply_failed",
+                        "phase": "rollback",
+                        "conflicts": ["CodeSmells/example.py"],
+                        "rollback_status": "partial",
+                        "recovery_artifacts": [
+                            "C:/private/.example.py.refactor-recovery-secret"
+                        ],
+                    },
+                }
+            }
+
+    monkeypatch.setattr(agent, "app_graph", FakeGraph())
+    events = list(agent.stream_refactor("继续", "apply-failure-test"))
+
+    structured = next(
+        event for event in events if event["type"] == "workspace.apply.failed"
+    )
+    legacy = next(event for event in events if event["type"] == "run.failed")
+    failure = structured["payload"]["apply_failure"]
+    assert failure["rollback_status"] == "partial"
+    assert failure["affected_files"] == ["CodeSmells/example.py"]
+    assert failure["recovery_available"] is True
+    assert "C:/private" not in str(structured)
+    assert legacy["payload"]["workspace_error"] == "需要人工处理"

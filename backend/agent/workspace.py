@@ -90,6 +90,77 @@ class AtomicApplyError(WorkspaceError):
         }
 
 
+def public_workspace_apply_failure(
+    detail: dict[str, Any] | None,
+    changed_files: Iterable[str],
+) -> dict[str, Any] | None:
+    """把事务异常投影为浏览器可行动但不泄露本机路径的稳定契约。"""
+
+    if detail is None:
+        return None
+
+    def safe_relative(value: object) -> str | None:
+        candidate = PurePosixPath(str(value).replace("\\", "/"))
+        if candidate.is_absolute() or ".." in candidate.parts:
+            return None
+        normalized = candidate.as_posix()
+        if not normalized.casefold().startswith("codesmells/"):
+            return None
+        return normalized
+
+    conflicts = [
+        normalized
+        for item in detail.get("conflicts", [])
+        if (normalized := safe_relative(item)) is not None
+    ]
+    fallback_files = [
+        normalized
+        for item in changed_files
+        if (normalized := safe_relative(item)) is not None
+    ]
+    affected_files = list(dict.fromkeys(conflicts or fallback_files))[:20]
+    raw_artifacts = detail.get("recovery_artifacts", [])
+    recovery_ids = [
+        hashlib.sha256(Path(str(item)).name.encode("utf-8")).hexdigest()[:16]
+        for item in raw_artifacts
+    ]
+    raw_rollback = str(detail.get("rollback_status") or "not_started")
+    rollback_status = "not_started" if raw_rollback == "not_required" else raw_rollback
+    manual = rollback_status == "partial"
+    return {
+        "code": str(detail.get("code") or "workspace_apply_failed"),
+        "phase": str(detail.get("phase") or "unknown"),
+        "conflict_category": str(detail.get("code") or "workspace_apply_failed"),
+        "rollback_status": rollback_status,
+        "requires_manual_action": manual,
+        "affected_file_count": len(affected_files),
+        "affected_files": affected_files,
+        "recovery_available": bool(recovery_ids),
+        "recovery_ids": recovery_ids,
+        "guidance": (
+            "应用未能完整恢复；系统未覆盖第三方新修改。请先核对列出的文件与恢复材料，核对前不要重新应用。"
+            if manual
+            else (
+                "应用失败但补偿回滚已完成；请解决冲突后重新运行。"
+                if rollback_status == "complete"
+                else "应用在写入前停止；请核对冲突文件后重试。"
+            )
+        ),
+    }
+
+
+def _workspace_failure_detail(exc: Exception) -> dict[str, Any]:
+    if isinstance(exc, (AtomicApplyError, BaselineConflictError)):
+        return dict(exc.detail)
+    return {
+        "code": "workspace_validation_failed",
+        "phase": "preflight",
+        "conflicts": [],
+        "rollback_status": "not_required",
+        "recovery_artifacts": [],
+    }
+
+
 @dataclass(frozen=True)
 class _TargetState:
     kind: Literal["missing", "file", "directory", "special"]
@@ -890,6 +961,7 @@ def apply_workspace_changes_node(state: State) -> dict[str, Any]:
         raise
     except Exception as exc:
         cleanup = cleanup_workspace_node(state)
+        failure_detail = _workspace_failure_detail(exc)
         return {
             **cleanup,
             "review_status": "failed",
@@ -899,11 +971,8 @@ def apply_workspace_changes_node(state: State) -> dict[str, Any]:
                 exc.rolled_back if isinstance(exc, AtomicApplyError) else False
             ),
             "workspace_error": str(exc),
-            "workspace_apply_failure": (
-                exc.detail
-                if isinstance(exc, (AtomicApplyError, BaselineConflictError))
-                else None
-            ),
+            "workspace_apply_failure": failure_detail,
+            "workspace_changed_files": changed_files,
         }
 
 

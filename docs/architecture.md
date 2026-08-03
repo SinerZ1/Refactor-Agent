@@ -112,6 +112,12 @@ Developer 上下文包含当前任务、唯一允许写入路径，以及从权�
 
 所有事件携带 `run_id`；任务事件携带 `task_id`。前端 reducer 会忽略旧 run 的迟到消息，避免新会话被过期 WebSocket 数据污染。
 
+### 4.5 运行生命周期与应用失败快照
+
+SSE 连接不是生命周期事实的唯一载体。进程内 `RunStatusRegistry` 按 `run_id` 保存有 TTL 和容量上限的脱敏投影，并通过会话令牌保护的运行状态接口恢复读取。`lifecycle_status` 明确区分 `running`、`waiting_for_hitl`、`cancelling`、`cleanup_pending`、`cleanup_completed`、`cleanup_failed`、`completed` 与 `failed`；有效 HITL 保留通过 `workspace_retained=true` 表达，不与清理泄漏混淆。producer 有界等待超时后先写入 `cleanup_pending`，后台线程真正退出并释放资源后再更新为 `cleanup_completed`，失败则为 `cleanup_failed`。
+
+apply 失败同时保留旧 `workspace_error` 兼容字段，并新增 `workspace.apply.failed` 与状态快照中的安全结构对象。对象只包含阶段、冲突类别、`not_started/complete/partial` 回滚状态、人工处理标志、受影响的 `CodeSmells/` 相对路径、恢复材料不可逆标识和静态建议；不发送恢复材料内容或本机绝对路径。`partial` 明确表示系统为保护第三方新修改而拒绝覆盖，需要人工核对后才能再次 apply。
+
 ## 5. Reviewer 证据门禁
 
 Reviewer 没有文件读取或写入工具，唯一工具是 `run_unit_tests`。成功终态必须同时满足：

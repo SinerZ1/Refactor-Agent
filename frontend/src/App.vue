@@ -12,6 +12,7 @@ import { useApprovalFlow } from './composables/useApprovalFlow'
 import { useBackendSession } from './composables/useBackendSession'
 import { useRefactorStream } from './composables/useRefactorStream'
 import { useRunBudget } from './composables/useRunBudget'
+import { useRunLifecycle } from './composables/useRunLifecycle'
 import { useTaskDag } from './composables/useTaskDag'
 import { useTheme } from './composables/useTheme'
 import type { AgentLog } from './types/workspace'
@@ -36,12 +37,7 @@ const {
   updateAgentResponse,
   userChatInput,
 } = useAgentChat()
-const {
-  applyDagEvent,
-  dagEdges,
-  dagNodes,
-  resetDag,
-} = useTaskDag()
+const { applyDagEvent, dagEdges, dagNodes, resetDag } = useTaskDag()
 const {
   applyRunBudgetEvent,
   exceededReason,
@@ -62,6 +58,13 @@ const {
   threadId,
 } = useBackendSession({ activeRunId, onError: appendError })
 
+const {
+  applyEvent: applyRunLifecycleEvent,
+  refresh: refreshRunLifecycle,
+  reset: resetRunLifecycle,
+  status: runStatus,
+} = useRunLifecycle({ activeRunId, onError: appendError, sessionToken, threadId })
+
 let resumeStream: () => Promise<void> = async () => undefined
 const {
   approvalPayload,
@@ -79,15 +82,12 @@ const {
   threadId,
 })
 
-const {
-  cancelActiveStream,
-  isRefactoring,
-  sendStreamRequest,
-} = useRefactorStream({
+const { cancelActiveStream, isRefactoring, sendStreamRequest } = useRefactorStream({
   activeRunId,
   applyEvent: (event) => {
     applyDagEvent(event)
     applyRunBudgetEvent(event)
+    applyRunLifecycleEvent(event)
   },
   beginAgentResponse,
   ensureBackendSession,
@@ -95,11 +95,15 @@ const {
   onApproval: handleStreamApproval,
   onLog: (log) => agentLogs.value.push(log),
   onPlanCreated: () => workspaceTabsRef.value?.handlePlanCreated(),
-  onStreamSettled: () => workspaceTabsRef.value?.refreshTopology(),
+  onStreamSettled: () => {
+    workspaceTabsRef.value?.refreshTopology()
+    void refreshRunLifecycle()
+  },
   resetInitialTurn: () => {
     resetChat()
     resetDag()
     resetRunBudget()
+    resetRunLifecycle()
   },
   sessionToken,
   threadId,
@@ -191,6 +195,7 @@ onUnmounted(() => {
         :budget-usage="budgetUsage"
         :is-budget-exceeded="isBudgetExceeded"
         :logs="agentLogs"
+        :run-status="runStatus"
         :theme="resolvedTheme"
       />
     </main>

@@ -8,7 +8,14 @@ from urllib.parse import urlsplit
 
 import uvicorn
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import (
+    FastAPI,
+    Header,
+    HTTPException,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -29,8 +36,13 @@ from agent.run_lifecycle import (
     RunTermination,
     active_runs,
 )
+from agent.run_status import run_statuses
 from agent.workflow import get_checkpointer_health
-from agent.workspace import build_workspace_snapshot, cleanup_run_workspace
+from agent.workspace import (
+    build_workspace_snapshot,
+    cleanup_run_workspace,
+    public_workspace_apply_failure,
+)
 from agent_core import stream_refactor
 from code_indexer import index_directory
 from graph_indexer import get_neo4j_health, get_topology_data, index_to_neo4j
@@ -415,6 +427,24 @@ def submit_approval(thread_id: str, request: ApprovalDecisionRequest):
     return ApprovalDecisionResponse(approval_id=request.approval_id)
 
 
+@app.get("/api/sessions/{thread_id}/runs/{run_id}")
+def get_run_status_snapshot(
+    thread_id: str,
+    run_id: str,
+    session_token: str = Header(alias="X-Session-Token"),
+):
+    """供 SSE 断开后恢复读取清洗终态；身份仍绑定原会话令牌。"""
+
+    try:
+        runtime_sessions.require(thread_id, session_token)
+    except SessionAuthorizationError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    snapshot = run_statuses.get(run_id, thread_id)
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="运行状态不存在或已过期")
+    return snapshot
+
+
 @app.get("/api/models/adc-status")
 def get_adc_status():
     """返回脱敏后的 ADC 探测结果，绝不把本机凭据路径发送到浏览器。"""
@@ -639,12 +669,30 @@ def refactor_code_stream(request: RefactorRequest, http_request: Request):
                         review_status = state.values.get("review_status")
                         workspace_id = state.values.get("workspace_id")
                         workspace_applied = state.values.get("workspace_applied", False)
+                        apply_failure = public_workspace_apply_failure(
+                            state.values.get("workspace_apply_failure"),
+                            state.values.get("workspace_changed_files", []),
+                        )
+                        if apply_failure is not None:
+                            run_statuses.update(
+                                run_id,
+                                lifecycle_status="failed",
+                                terminal_status="failed",
+                                termination_reason="workspace_apply_failed",
+                                apply_failure=apply_failure,
+                            )
                         if (
                             review_status == "success"
                             and (not workspace_id or workspace_applied)
                             and not stream_failed
                         ):
                             termination = RunTermination.COMPLETED
+                            run_statuses.update(
+                                run_id,
+                                lifecycle_status="completed",
+                                terminal_status="completed",
+                                termination_reason=termination.value,
+                            )
                             enqueue(
                                 serialize_run_event(
                                     make_agent_event(
@@ -661,6 +709,12 @@ def refactor_code_stream(request: RefactorRequest, http_request: Request):
                                 RunTermination.BUDGET_EXCEEDED
                                 if state.values.get("budget_exceeded", False)
                                 else RunTermination.FAILED
+                            )
+                            run_statuses.update(
+                                run_id,
+                                lifecycle_status="failed",
+                                terminal_status="failed",
+                                termination_reason=termination.value,
                             )
                             enqueue(
                                 serialize_run_event(

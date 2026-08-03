@@ -16,6 +16,7 @@ Refactor-Agent 是一个面向 Python 历史代码的多智能体重构工作台
 - 可信行为契约位于 Agent 不可写的 `backend/behavior_tests/`；Reviewer 以固定测试代码验证当前 run 的隔离 `working/CodeSmells`，计划、写工具与最终应用都会拒绝触碰测试边界。
 - 最终完整聚合 diff 只审批一次；批准时执行进程内 apply 串行化、替换前冲突重检、单文件原子替换与安全补偿回滚。
 - SSE 传输版本化结构事件，WebSocket 承载 A2A 消息与低延迟审批通知。
+- 运行状态快照可恢复读取延迟清理终态，并以安全相对路径展示完整/部分回滚与恢复材料标识。
 - Redis 不可用时降级为 `MemorySaver`，Neo4j 不可用时降级为内存 AST 调用图。
 - 前端 Markdown 统一经过 DOMPurify allowlist，模型 URL 经过 SSRF 防护。
 - 21 个离线 scripted-model 场景通过生产图稳定回归计划、DAG、工具权限、证据门禁、预算、HITL 与工作区事务。

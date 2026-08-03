@@ -12,7 +12,7 @@ from .events import AgentEvent, make_agent_event
 from .plans import RefactorPlan, find_plan_task_id
 from .state import State, get_message_text
 from .workflow import app_graph
-from .workspace import cleanup_run_workspace
+from .workspace import cleanup_run_workspace, public_workspace_apply_failure
 
 # 显式导出
 __all__ = ["app_graph", "simple_refactor", "stream_refactor"]
@@ -593,6 +593,20 @@ def stream_refactor(
                                 success=False,
                             )
                         yield make_agent_event(
+                            "workspace.apply.failed",
+                            "工作区应用事务未完成",
+                            level="error",
+                            node="workflow",
+                            success=False,
+                            payload={
+                                "workspace_error": str(node_output["workspace_error"]),
+                                "apply_failure": public_workspace_apply_failure(
+                                    node_output.get("workspace_apply_failure"),
+                                    node_output.get("workspace_changed_files", []),
+                                ),
+                            },
+                        )
+                        yield make_agent_event(
                             "run.failed",
                             str(node_output["workspace_error"]),
                             level="error",
@@ -605,6 +619,11 @@ def stream_refactor(
                                 "applied": False,
                                 "rolled_back": node_output.get(
                                     "workspace_rolled_back", False
+                                ),
+                                "workspace_error": str(node_output["workspace_error"]),
+                                "apply_failure": public_workspace_apply_failure(
+                                    node_output.get("workspace_apply_failure"),
+                                    node_output.get("workspace_changed_files", []),
                                 ),
                             },
                         )
