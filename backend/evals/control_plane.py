@@ -1,3 +1,5 @@
+# ruff: noqa: E402 -- offline sentinel 必须先于 agent 包导入，阻断 dotenv/Redis 副作用。
+
 from __future__ import annotations
 
 import os
