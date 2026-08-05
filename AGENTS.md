@@ -18,21 +18,29 @@
 ---
 
 ## 2. 核心目录与模块化架构
-- `CodeSmells/`: 存放待重构的 Python 历史代码（包含故意设计的坏味道代码）。
+- `CodeSmells/`: 存放待重构的 Python 历史代码（包含故意设计的坏味道代码，作为教学与重构示例）。
 - `backend/`: FastAPI 后端与 LangGraph 多智能体引擎。
-  - **核心重构变更**: `agent_core.py` 现已只是无缝重导出的包装层。真正的核心逻辑被完全拆分在 `backend/agent/` 子包内：
-    - `state.py`: 图状态定义。
+  - `agent/`: 核心重构 agent 包：
+    - `state.py`: 图状态定义、记录合并器、完整工作区快照摘要与证据检查。
     - `prompts.py`: 角色 System Prompts。
-    - `tools.py`: 工具库。
-    - `nodes.py`: 节点逻辑（支持运行时隔离实例化大模型）。
-    - `edges.py`: 条件路由（审查重试与结束）。
-    - `workflow.py`: 状态图编排编译。
-    - `scheduler.py`: Architect 任务 DAG 校验、确定性拓扑调度、任务重试与依赖阻断。
-    - `workspace.py`: run 级双快照隔离、聚合 diff、冲突检测、原子应用与补偿回滚。
-  - `backend/evals/`: 离线 fake model 与可选真实模型 Agent Eval；报告不得保存 Prompt、原始模型响应或凭据。
-  - `backend/scripts/`: 重建的核心脚本包，使用 `.pth` 注入虚拟环境解决 Windows 下子进程命令报错。
+    - `tools.py`: 白名单工具库（只读文件、隔离写入、测试套件、符号查询）。
+    - `nodes.py`: 角色节点与预算用量记账。
+    - `edges.py`: 条件路由（审查重试与审查协议校验）。
+    - `workflow.py`: 生产状态图装配与 Checkpointer 连接。
+    - `scheduler.py`: Architect 任务 DAG 校验、确定性拓扑调度、任务重试、下游重开与依赖阻断。
+    - `workspace.py`: run 级双快照隔离、聚合 diff、冲突检测、乐观并发 apply 与安全补偿回滚。
+    - `path_policy.py`: 路径规范化、仓库/重构根判定与 `backend/behavior_tests` 可信只读策略。
+    - `run_lifecycle.py`: 逻辑 run 的统一资源所有者，管理 producer 线程有界 join、协作式停止信号、临时凭据撤销、checkpoint 删除与工作区回收。
+    - `run_status.py`: 容量受控 (容量 512)、TTL 受控 (30 分钟) 的脱敏 run 生命周期与 apply 失败状态快照注册表，支持恢复读取。
+  - `behavior_tests/`: 移出 Agent 可写区（`CodeSmells/`）的可信行为契约套件，Reviewer 通过 `REFACTOR_CODE_ROOT` 对当前 run 的隔离 `working/CodeSmells` 执行验证。
+  - `evals/`: 离线 scripted model 与可选真实模型 Agent Eval：
+    - `control_plane.py`: 驱动真实生产 `build_agent_graph` 的控制面场景运行器。
+    - `models.py`: `ScriptedFakeModel` 确定性脚本模型与 `LiveEvaluationModel` 只读判定器。
+    - `runner.py`: 自动化行为断言评分与基准漂移比较 (`baseline_drift`)。
+    - `scenarios.py`: 21 个覆盖代码质量、跨文件 DAG、攻击防护、证据门禁、预算熔断、HITL 与事务冲突的离线场景。
+  - `scripts/`: 核心工程脚本包，在虚拟环境中通过 `python -m scripts` 执行。
 - `frontend/`: Vue 3 + Vite + TypeScript 前端；会话、SSE、WebSocket、审批、Agent 聊天与工作区视图由 composable/组件分层管理。
-- `docs/`: 当前执行架构、安全模型、Agent Eval、开发指南和 ADR。
+- `docs/`: 当前执行架构、安全模型、Agent Eval、开发指南和 ADR 索引。
 
 ---
 
@@ -46,8 +54,11 @@
   - 格式与类型检查: `venv/Scripts/check-format.exe`, `venv/Scripts/check-sort-imports.exe`, `venv/Scripts/check-mypy.exe`, `venv/Scripts/check-lint.exe`
   - 运行单元测试: `venv/Scripts/test.exe`
   - 扫描死代码: `venv/Scripts/find-dead-code.exe`
+  - 运行离线评测: `venv/Scripts/python.exe -m evals.run --mode offline`
 
-不要调用系统 Python，也不要在仓库根目录直接运行这些后端脚本；部分脚本依赖 `backend/` 作为当前工作目录。
+*注意（Windows pytest 临时目录约束）*: 在 Windows 环境下，运行 `pytest` 时如遇到系统临时目录权限限制 (`PermissionError: WinError 5`)，通过 `--basetemp`（如 `--basetemp=.cache/pytest_tmp`）即可干净通过；内置脚本 `test-coverage.exe` 已包含完整覆盖率和测试支持。
+
+不要调用系统 Python，也不要在仓库根目录直接运行这些后端脚本。
 
 ---
 
@@ -65,80 +76,123 @@
 - **类型检查**: `npm run type-check` (基于 `vue-tsc --build`)
 - **前端 Lint**: `npm run lint` (并行运行 `oxlint . --fix` 与 `eslint . --fix --cache`)
 - **前端格式化**: `npm run format` (基于 `prettier --write`)
-- **单元测试**: `npm run test:unit`
-- **E2E 测试**: `npm run test:e2e`
+- **单元测试**: `npm run test:unit -- --run`
+- **E2E 测试**: `npm run test:e2e -- --project=chromium`
 
 ---
 
 ## 6. 前后端分离、多通道架构与可视化面板
-本项目包含极强的协同架构与可视化呈现：
 - **双轨通信通道**:
-  - **流式 SSE (单向流)**: 把 Agent 的 Thought（思考过程）、Tool Call（终端执行日志）和权威 `plan.*`、`task.*` 事件实时推送到 Vue 3 前端；必须保留心跳、禁缓存/代理缓冲和断连资源释放。
-  - **WebSocket (全双工)**: 承载 DeveloperAgent、ReviewerAgent 的 A2A 聊天和 HITL 恢复。Developer 只修改隔离工作区；所有任务通过 Reviewer 后才对完整聚合 diff 触发一次审批。
-- **动态多模型适配器**: 支持 OpenAI, DeepSeek, Zhipu, Gemini Studio, Google Vertex AI。支持本地 ADC (Application Default Credentials) 凭证文件加载。
+  - **流式 SSE (单向流)**: 把 Agent 的 Thought、Tool Call 和权威 `plan.*`、`task.*`、`run.lifecycle.updated` 事件实时推送到 Vue 3 前端；具备 SSE 心跳、禁缓存/代理缓冲和断连资源释放。
+  - **WebSocket (全双工)**: 承载 A2A 聊天和 HITL 低延迟通知/恢复。Developer 只修改隔离工作区；所有任务通过 Reviewer 后才对完整聚合 diff 触发一次审批。
+- **动态多模型适配器**: 支持 OpenAI, DeepSeek, Zhipu, Gemini Studio, Google Vertex AI。支持本地 ADC (Application Default Credentials) 凭证文件加载与安全脱敏展示。
 - **双图并进视图**:
-  - **图谱探查器 (ECharts)**: 基于 Neo4j 的代码依赖关系力导向网状图谱。
+  - **图谱探查器 (ECharts)**: 基于 Neo4j/AST 的代码依赖关系力导向网状图谱。
   - **任务 DAG 追踪 (Vue Flow)**: 仅依据后端 `plan.*`、`task.*` 权威事件和状态快照渲染任务、依赖、重试与阻断状态，不得从自然语言日志猜测 DAG 状态。
 - **Markdown 安全边界**: 所有进入 `v-html` 的 Agent、SSE 与 WebSocket Markdown 必须经过统一 DOMPurify 清洗，同时保留表格和代码块能力。
 
 ---
 
 ## 7. LangGraph 多智能体协同约束与代码实现要求
-在修改 `backend/agent/` 内逻辑时，必须严格遵循：
-- **工作流节点**: `Architect` -> `Developer` -> `Reviewer`。
-- **动态 DAG 控制面**: Architect 输出必须先经过结构化校验；调度器采用稳定、可复现的串行拓扑顺序，管理任务级 `pending/running/completed/failed/blocked` 状态、最多 3 次重试、依赖阻断和预算熔断。不得用自然语言日志替代权威状态。
-- **审查条件路由**:
-  - 失败时，回复内容 **必须** 包含 `【REFACTOR_FAIL】` 和唯一结构化失败对象；Reviewer 可指定 `failed_task_ids`，由调度器重开指定任务及其传递下游。
-  - 成功时，回复内容 **必须** 包含 `【REFACTOR_SUCCESS】`，且结构化证据门禁通过后才可进入最终审批；成功文本本身不是充分条件。
-  - Reviewer 成功证据必须与当前变更摘要绑定：存在成功写入、最新变更已运行包含 `CodeSmells` 的白名单测试、退出码为 0、输出包含成功标记，且任务/计划状态一致。Developer 再次写入后旧证据立即失效。
-- **工具权限**:
-  - `Architect`: 绑 `read_code_file`, `search_symbol_definition`, `query_neo4j_topology`。严禁写文件。
-  - `Developer`: 绑 `read_code_file`, `write_code_file`, `search_symbol_definition`；动态 DAG 模式下只能写当前任务声明的文件，且所有读写均指向 run 级隔离工作区。
-  - `Reviewer`: 绑 `run_unit_tests`。严禁读写文件。
-- **隔离与提交协议**:
-  - 每次 run 建立 `baseline/working` 双快照；Developer 和 Reviewer 全程只操作 `working`，任何非成功终态均不得修改真实 `CodeSmells/`。
-  - Reviewer 通过后固化变更文件、完整统一 diff 与 baseline/working 哈希，并只触发一次最终聚合 HITL。
-  - 批准时必须先检查真实源码基线冲突和审批后工作区篡改，再通过同目录临时文件、原子替换与补偿回滚提交多文件变更；拒绝、断连、预算失败或应用失败必须保持真实源码不变并清理隔离目录。
-- **网络与日志安全**: 所有出站 URL 必须校验结构、DNS 解析结果、私网/回环/链路本地地址和云元数据地址；Redis、Neo4j 与模型供应商错误必须脱敏，禁止记录凭据、Prompt 或原始模型响应。
 
-### 教学与理论落地级注释要求
-本项目的代码必须具有强烈的教学性质：
-1. **教学级架构与设计注释**: 拒绝基础 Python 语法解释，把注释留给 Agent 架构、状态流转机制。
-2. **理论与实践关联**: 在代码中关联学术概念（如：“*此处相当于 Hello-Agents 讲过的 ToolResponse 协议，在 LangGraph 中通过 Graph State 与 Checkpointer 实现...*”；HITL 相当于中断与状态机覆写）。
-3. **决策记录**: 写明复杂决策链路的初衷、Trade-offs 权衡、防御性编程与防幻觉设计。
+### 7.1 工作流与角色权限
+- **工作流节点主链**: `Architect` -> `Developer` -> `Reviewer`。
+- **工具权限划分**:
+  - `Architect`: 绑定 `read_code_file`, `search_symbol_definition`, `query_neo4j_topology`。严禁写文件。
+  - `Developer`: 绑定 `read_code_file`, `write_code_file`, `search_workspace_symbol_definition`；动态 DAG 模式下只能写当前任务声明的文件，读取与符号查询仅覆盖当前任务及传递依赖文件，且所有读写均指向 run 级隔离工作区 `working` 副本。
+  - `Reviewer`: 绑定 `run_unit_tests`。严禁读写文件或搜索符号。
+
+### 7.2 可信测试信任域约束
+- `backend/behavior_tests/` 是 Reviewer 使用的可信行为契约，属于 Agent 不可写信任域。
+- Architect 计划、Developer 写入、聚合 diff 和正式 apply 都由 `path_policy.py` 严格禁止触及 `backend/behavior_tests` 与 `codesmells/tests`。
+- Reviewer 通过受控环境变量 `REFACTOR_CODE_ROOT` 测试当前 run 的 `working/CodeSmells` 隔离副本，不得测试原始用户源码或错误工作区。
+- 禁止把可信测试复制回 `CodeSmells/` 或其他 Agent 可写目录作为伪造 oracle。
+
+### 7.3 完整工作区证据约束
+- 测试证据必须基于完整受管理工作区（`CodeSmells/` 包含的所有文件）的确定性快照摘要 (`workspace_snapshot_digest`)，绝不能只基于变更记录条数或 Agent 自报列表。
+- `change_records` 仅用于 UI/审计展示。
+- 测试过程产生源码副作用（`workspace_stable=False`）时测试记录标记为不通过。
+- Developer 任何新的写入都会显式清空旧测试记录 (`test_run_records = []`)，使旧证据立即失效。
+- Reviewer 成功、最终聚合审批和正式 apply 必须核对同一工作区内容身份 (`current_digest == final_digest == reviewed_digest`)。
+
+### 7.4 工作区符号与依赖上下文
+- Architect 检索用户原始源码静态索引 (`get_symbol_definition_content`)；
+- Developer 检索当前 run 的 `working` 树私有快照 (`search_workspace_symbol_definition`)，能准确反映写入、删除、重命名与语法错误。
+- 绝不得通过修改进程全局索引来实现 run 隔离；并发 run 不得共享可变候选索引。
+- 动态任务只可读取当前任务文件及其传递依赖文件；下游依赖上下文通过有界、可机器解析的 `DEPENDENCY_RESULTS` JSON 传递。
+- Reviewer 打回重开任务时，必须清除指定任务及其传递下游的旧结果。
+
+### 7.5 Run 生命周期与资源所有权
+- `RunLifecycle` 是 run 资源的统一所有者，负责管理 producer 线程有界 join、协作式停止信号 (`stop_requested`)、临时凭据撤销、checkpoint 删除与工作区回收。
+- 清理操作必须幂等，并正确处理 cancellation 异常。
+- 只有在 checkpoint 存在有效最终审批 interrupt、身份一致且快照摘要匹配时，才建立显式 `HitlRetention`；非 HITL 终态、拒绝或取消必须清理工作区与 checkpoint。
+- producer 超时未退出时，由受跟踪的后台 task (`_finish_after_producer`) 在线程真正结束后延迟回收，不得提前删除仍被线程访问的资源。
+- WebSocket 是会话级资源，不得在单个 run 结束时被错误关闭。
+
+### 7.6 生命周期与事务状态可观测性
+- `RunStatusRegistry` 是单进程、容量 512、TTL 30 分钟的脱敏运行状态快照注册表，支持 SSE 断连后的恢复读取。
+- 快照查询必须校验 `thread_id` 与 `session_token`。
+- `lifecycle_status` 明确区分 `running`、`waiting_for_hitl`、`cancelling`、`cleanup_pending`、`cleanup_completed`、`cleanup_failed`、`completed` 与 `failed`。
+- apply 失败转换为 `public_workspace_apply_failure`，只包含冲突分类、`rollback_status` (`complete/partial/not_started`)、受影响的 `CodeSmells/` 相对路径和脱敏 `recovery_ids`（SHA-256 摘要）；绝不泄露本机绝对路径或恢复材料源码。
+
+### 7.7 正式应用乐观并发控制与安全补偿边界
+- 对同一规范化源码根目录的正式 apply 必须在进程内互斥锁 (`_apply_critical_section`) 中串行执行。
+- 临界区完整覆盖证据复核、基线预检、同目录临时文件准备、逐文件替换、冲突检测、补偿回滚与临时文件清理。
+- 提交前全量预检与每个文件 `os.replace` 前，必须重检真实源码与 baseline 一致 (`_assert_target_matches_baseline`)；组件包含符号链接或 reparse point 时失败关闭。
+- 补偿回滚只有在目标仍等于本事务写入摘要时才进行恢复；若第三方已再次修改目标，自动回滚拒绝覆盖它，并返回 `rollback_status="partial"`，备份文件改名为同目录 `.refactor-recovery-<transaction_id>` 恢复材料留待人工核对。
+- **边界**：进程内锁仅协调本服务实例，无法约束外部编辑器；多文件替换是应用级乐观并发控制与安全补偿，不是文件系统级或数据库级的强原子事务，不保证掉电恢复。
+
+### 7.8 离线 Eval 约束与防循环验证
+- `input`、`script`、`actual` 与 `expected` 必须严格分离。
+- `ScriptedFakeModel` 构造函数只接受 `script`，无法访问 `scenario.expected`；`expected` 修改只改变断言判定，绝不改变 `actual` 采集。
+- 离线 Eval 驱动生产 `build_agent_graph` 图工厂，真实执行节点、ToolNode、scheduler、条件边、证据门禁与工作区事务。
+- `ScriptedFakeModel` 必须对角色、任务 ID、重试次数、工具轮次与图阶段进行严格校验；未声明调用、顺序错误或脚本未消费完均立即触发 `AssertionError` 失败（fail-closed）。
+- 默认 `evals.run --mode offline` 完全离线，不读取 `.env`，使用临时源码根与 `MemorySaver`；默认只读比较基准 `baselines/offline.json`，存在漂移时返回非零退出码，绝不自动覆盖基准。只有显式 `--update-baseline` 参数才更新基准。
+- 报告不得保存 Prompt、模型原始响应、源码全文、完整 diff、凭据或用户绝对路径。
+
+### 7.9 前端状态约束与代际隔离
+- 切换 session 或发起新重构时，统一调用 `resetRunScopeState` 清空 DAG、聊天、日志、审批、预算和生命周期状态。
+- 主题与模型选择属于用户级配置，不参与重置。
+- 所有异步数据写入（SSE、WebSocket、审批 HTTP、状态快照）必须同时校验 connection generation、`thread_id` / `session_token` 身份以及 `activeRunId`；旧会话或旧 run 的迟到消息必须被忽略。
+- 所有传给 `v-html` 的 Markdown 必须经过 `renderSafeMarkdown()` 清洗。
 
 ---
 
-## 8. 项目阶段状态（阶段 0–8 已全部完成）
-- **阶段 0—开发基线与说明骨架**: 根 README 已覆盖前后端启动、基础设施降级路径和动态 DAG 能力边界。
-- **阶段 1—Markdown 注入修复**: 建立统一 DOMPurify 安全渲染边界，覆盖 Agent 与 WebSocket 消息并保留 Markdown、表格和代码块。
-- **阶段 2—Reviewer 结构化证据硬门禁**: 测试记录绑定当前变更摘要；写入、测试套件、退出码、成功标记和证据时效共同决定成功终态。
-- **阶段 3—后端安全与接口契约**: 统一出站网络校验和错误脱敏；Neo4j/Redis 安全降级；移除不支持 HITL 的同步接口；SSE 支持心跳、禁缓存/缓冲和断连清理。
-- **阶段 4—前端巨型组件拆分**: 会话、流式通信、审批、Agent 聊天和工作区视图已解耦为可测试 composable/组件；另行修复依赖图谱主题硬编码。
-- **阶段 5—真实动态任务 DAG 调度**: Architect 计划成为执行控制面，支持稳定串行拓扑、任务状态/重试、依赖阻断、预算失败、HITL 原任务恢复和 Reviewer 结构化打回。
-- **阶段 6—隔离工作区与原子应用**: 建立 run 级双快照、结构化哈希、完整聚合 diff、一次最终 HITL、基线冲突检测、原子替换和补偿回滚。
-- **阶段 7—Agent Eval 与可观测性**: 覆盖代码质量、工作流失败、安全攻击、预算熔断和 HITL 拒绝；支持离线 fake model 基准回归和受安全边界约束的可选真实模型评测。
-- **阶段 8—CI、文档与求职展示**: 建立完全离线可验证的 Windows CI，补齐真实执行架构、安全模型、Agent Eval、开发指南和五项核心 ADR；README 可供新用户和面试官快速复现核心能力。
+## 8. 项目阶段状态与加固基线
 
-后续修改必须把上述能力视为当前基线；若替换已采纳的架构决策，应新增 ADR 并把旧 ADR 标记为“已取代”，不得直接改写历史决策。
+### 阶段 0–8（基础能力全量完成）
+- **阶段 0—开发基线与说明骨架**: README 覆盖启动、基础设施降级与动态 DAG 边界。
+- **阶段 1—Markdown 注入修复**: DOMPurify 安全渲染边界，覆盖 Agent 与 WebSocket 消息。
+- **阶段 2—Reviewer 结构化证据硬门禁**: 结构化证据门禁决定成功终态。
+- **阶段 3—后端安全与接口契约**: 出站网络校验、错误脱敏、Redis/Neo4j 降级与 SSE 心跳/清理。
+- **阶段 4—Frontend 前端组件解耦**: 模块化 composable/组件分层。
+- **阶段 5—真实动态任务 DAG 调度**: 结构化计划控制面、拓扑调度、重试与阻断。
+- **阶段 6—隔离工作区与原子应用**: run 级双快照、一次聚合 HITL、基线冲突检测与安全补偿。
+- **阶段 7—Agent Eval 与可观测性**: 21 个离线控制面场景、指标体系与报告隐私边界。
+- **阶段 8—CI、文档与求职展示**: Windows 离线 CI、五项核心 ADR 与完整工程文档。
+
+### 阶段完成后的可信性加固基线
+1. **可信执行链加固**: 可信行为契约迁至 Agent 不可写的 `backend/behavior_tests`；Reviewer 测试绑定完整工作区快照摘要；Developer 符号查询限制在授权任务及传递依赖范围内。
+2. **生命周期与并发事务加固**: `RunLifecycle` 拥有资源生命周期，支持有界等待与延迟清理；`RunStatusRegistry` 提供脱敏快照恢复读取；正式 apply 实施进程内分根锁、乐观重检与安全补偿。
+3. **真实控制面 Eval 与前端状态收尾**: 离线 Eval 驱动生产控制面图，实现 fail-closed 脚本协议与防循环验证；前端构建多代际（generation）与 `run_id` 双重隔离，抵御迟到事件污染。
+
+后续修改必须将上述基线视为既有约束；若替换采纳的决策，应新增 ADR 并把旧 ADR 标记为“已取代”。
 
 ---
 
 ## 9. Git 提交规范
-- 完成**每一个阶段的功能**后立即进行 Git 提交。
-- Commit Message 沿用仓库现有的 Conventional Commits 风格：`<type>: <中文摘要>`。冒号使用半角字符，冒号后保留一个空格，标题末尾不加句号。
-- `type` 应与改动性质一致：新功能使用 `feat`，缺陷修复使用 `fix`，文档使用 `docs`，代码重构使用 `refactor`，工程维护使用 `chore`；不要为了强调改动而随意组合类型。
-- 中文摘要应简洁说明实际结果，优先使用“实现”“支持”“修复”“解决”“重构”“更新”“删除”等自然动词，避免空泛表述、营销措辞和“AI 味”。例如：`feat: 支持前端动态配置模型`、`fix: 修复测试工具的执行路径问题`、`docs: 更新 Git 提交规范`。
-- 每个提交只包含一个完整主题；功能与其直接相关的测试可放在同一提交，无关修复或格式化应拆分提交。
-- 提交前先检查 `git status --short` 和目标文件的 diff，只暂存本阶段修改；不得覆盖、回滚或顺带提交用户已有改动。
+- 完成**每一个阶段或主题的独立功能/文档**后立即进行 Git 提交。
+- Commit Message 沿用 Conventional Commits 风格：`<type>: <中文摘要>`。冒号使用半角字符，冒号后保留一个空格，标题末尾不加句号。
+- `type` 选项：`feat`（新功能）、`fix`（修复）、`docs`（文档）、`refactor`（重构）、`chore`（工程维护）。
+- 摘要使用自然动词，例如：`feat: 支持前端动态配置模型`、`fix: 修复测试工具的执行路径问题`、`docs: 更新可信执行与评测开发约束`。
+- 每个提交只包含一个完整主题；提交前先检查 `git status --short` 和 diff，只暂存目标修改。
 
 ---
 
 ## 10. 实施与验证流程
-- 修改前先阅读目标模块及其直接调用方，优先复用现有抽象，避免无关的大范围重写。
+- 修改前先阅读目标模块及其直接调用方，优先复用现有抽象。
 - 使用 PowerShell 5.1 兼容语法；搜索文件和文本时优先使用 `rg --files` 与 `rg`。
-- 验证遵循“最小相关集优先”：后端改动先运行对应检查或测试，再按风险扩大到完整检查；前端改动至少运行 `npm run type-check`，涉及行为时补充相关单元测试。
-- `npm run lint`、`npm run format` 以及后端格式化脚本会改写文件，执行前确认范围，执行后检查 diff，避免混入无关格式变化。
-- Neo4j、Redis 或外部模型服务未启动时，应验证既有降级路径，不得为了让测试通过而移除降级机制。
-- 修改配置、日志或示例时不得新增密钥、令牌或本机凭据；已有敏感配置也不得复制到新文件或输出到日志。
+- 后端改动必须在 `backend/` 目录下使用 `venv/Scripts/` 运行对应检查和测试；前端改动必须在 `frontend/` 目录下运行 `npm run type-check` 与 `npm run test:unit -- --run`。
+- `npm run lint`、`npm run format` 以及后端格式化脚本会改写文件，执行前确认范围，执行后检查 diff。
+- Neo4j、Redis 或外部模型服务未启动时，必须验证既有降级路径，不得删除降级逻辑。
 - CI 和 Agent Eval 默认必须完全离线、可复现；真实模型评测只能作为显式启用的可选路径。
