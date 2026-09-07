@@ -292,7 +292,7 @@ Architect 输出的 `refactor_plan` 不是展示数据，而是后端调度输�
 
 指标定义、场景分层和 live 模式限制见 [Agent 评测说明](docs/agent-evaluation.md)。
 
-## 面试问答式设计决策
+## 关键架构设计决策
 
 ### 为什么 SSE 与 WebSocket 并存？
 
