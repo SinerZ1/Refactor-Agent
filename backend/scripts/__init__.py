@@ -1,6 +1,7 @@
 import os
 import subprocess
 import sys
+import uuid
 from collections.abc import Mapping, Sequence
 from typing import NoReturn
 
@@ -123,4 +124,17 @@ def test_verbose():
 
 
 def test_coverage():
-    run_command(["pytest", "--cov", "--cov-report=term-missing"], run_in_root=False)
+    run_id = uuid.uuid4().hex
+    basetemp = f".cache/pytest_tmp_{run_id}"
+    cache_dir = f".cache/pytest_cache_{run_id}"
+    run_command(
+        [
+            "pytest",
+            f"--basetemp={basetemp}",
+            "-o",
+            f"cache_dir={cache_dir}",
+            "--cov",
+            "--cov-report=term-missing",
+        ],
+        run_in_root=False,
+    )
