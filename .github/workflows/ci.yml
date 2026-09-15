@@ -21,6 +21,8 @@ jobs:
         shell: powershell
         working-directory: backend
     env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "utf-8"
       REDIS_URL: ""
       NEO4J_URI: ""
       NEO4J_USER: ""
